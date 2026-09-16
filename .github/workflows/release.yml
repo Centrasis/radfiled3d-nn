@@ -95,25 +95,32 @@ jobs:
           path: dist/*.tar.gz
 
   wheels-linux:
-    name: Wheel (Linux, ${{ matrix.python-name }})
+    name: Wheel (manylinux_2_28, ${{ matrix.python-name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - python-version: "3.11"
-            python-name: cp311
-          - python-version: "3.12"
-            python-name: cp312
-          - python-version: "3.13"
-            python-name: cp313
-          - python-version: "3.14"
-            python-name: cp314
+        # ONE manylinux tag is technically supportable here, and it is decided by the vendored
+        # ONNX Runtime rather than by taste:
+        #
+        #   * `libonnxruntime.so` 1.29.0 imports symbols versioned GLIBC_2.28, so manylinux2014
+        #     (glibc 2.17) cannot load it. A wheel built there would install and fail at import.
+        #     RadFiled3D can publish that tag only because it vendors no ORT.
+        #   * musllinux is out from the other side: Microsoft publishes no musl build of ORT.
+        #   * manylinux_2_34 would be REDUNDANT, not extra coverage. auditwheel tags a wheel by the
+        #     symbols it actually needs, not by the image it was built in (RadFiled3D's own wheel is
+        #     tagged manylinux_2_27.manylinux_2_28 — a computed policy), so a 2_34 build of this
+        #     package resolves to manylinux_2_28 again and collides with this one by filename. And a
+        #     manylinux_2_28 wheel already installs on ANY glibc >= 2.28, so 2_34 would serve a
+        #     strict subset of the same users.
+        python-name: [cp312, cp313, cp314]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          # Only runs cibuildwheel itself; the interpreters that build the wheels live in the
+          # container and are chosen by CIBW_BUILD.
+          python-version: "3.13"
       - name: Build wheel
         uses: pypa/cibuildwheel@v3.4.0
         env:
@@ -122,11 +129,11 @@ jobs:
           # The version provider reads GITHUB_REF, so it has to reach inside the build container.
           CIBW_ENVIRONMENT_PASS_LINUX: "GITHUB_REF"
           CIBW_BUILD: "${{ matrix.python-name }}-manylinux_x86_64"
-          CIBW_PROJECT_REQUIRES_PYTHON: ">=3.11"
+          CIBW_PROJECT_REQUIRES_PYTHON: ">=3.12"
           CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
-          # C++20 throughout, and RadFiled3D 1.3.6 needs a modern libstdc++. manylinux_2_28's stock
-          # GCC 12 is new enough; gcc-toolset-13 is used to match what RadFiled3D's own wheels are
-          # built with, so the two extensions share one ABI.
+          # gcc-toolset-13 matches what RadFiled3D's own wheels are built with, so the two
+          # extensions share one ABI — which is what lets `to_host_field()` hand back RadFiled3D's
+          # own type through the pybind11 registry.
           CIBW_BEFORE_ALL: "dnf install -y gcc-toolset-13-gcc gcc-toolset-13-gcc-c++"
           CIBW_ENVIRONMENT: "CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++"
           # ONNX Runtime is fetched by CMake and vendored into the wheel, so a released wheel can run
@@ -170,29 +177,27 @@ jobs:
           path: dist/*.whl
 
   test-python:
-    name: Python tests (${{ matrix.python-name }})
+    name: Python tests (${{ matrix.python.name }})
     runs-on: ubuntu-latest
     needs: [wheels-linux]
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - python-version: "3.11"
-            python-name: cp311
-          - python-version: "3.12"
-            python-name: cp312
-          - python-version: "3.13"
-            python-name: cp313
-          - python-version: "3.14"
-            python-name: cp314
+        # Both images are published, so both are tested; a wheel nobody installed is a wheel nobody
+        # knows loads.
+        # An OBJECT per entry so the interpreter and its wheel tag travel together.
+        python:
+          - { version: "3.12", name: cp312 }
+          - { version: "3.13", name: cp313 }
+          - { version: "3.14", name: cp314 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python.version }}
       - uses: actions/download-artifact@v4
         with:
-          name: wheel-linux-${{ matrix.python-name }}
+          name: wheel-linux-${{ matrix.python.name }}
           path: dist/
       # Installing the BUILT WHEEL rather than the source tree is what proves the layout works as
       # shipped; RadFiled3D comes with it as a declared dependency.
@@ -230,7 +235,7 @@ jobs:
           summary: true
           display-options: fEX
           fail-on-empty: true
-          title: Python ${{ matrix.python-version }}
+          title: Python ${{ matrix.python.version }}
 
   publish:
     name: Publish to PyPI

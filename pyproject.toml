@@ -33,7 +33,9 @@ name = "radfiled3d-nn"
 dynamic = ["version"]
 description = "RF3M: a deployment container and GPU inference runtime for neural radiation fields."
 readme = "README.md"
-requires-python = ">=3.11"
+# 3.12 is the floor the wheels are built for; RadFiled3D publishes no cp311 wheel for Windows
+# either, so a 3.11 user could not have had a working pair on every platform anyway.
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "Felix Lehner" }]
 keywords = ["radiation", "dosimetry", "onnx", "inference", "radfiled3d"]
