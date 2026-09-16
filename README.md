@@ -1,5 +1,10 @@
 # radfiled3d-nn
 
+[![build, test, publish](https://github.com/Centrasis/radfiled3d-nn/actions/workflows/build-test-publish.yml/badge.svg)](https://github.com/Centrasis/radfiled3d-nn/actions/workflows/build-test-publish.yml)
+[![PyPI](https://img.shields.io/pypi/v/radfiled3d-nn.svg)](https://pypi.org/project/radfiled3d-nn/)
+[![Python versions](https://img.shields.io/pypi/pyversions/radfiled3d-nn.svg)](https://pypi.org/project/radfiled3d-nn/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **RF3M** — a deployment container and GPU inference runtime for *neural radiation fields*. C++20.
 
 [RadFiled3D](https://github.com/Centrasis/RadFiled3D) stores a simulated radiation field as a static
@@ -8,7 +13,7 @@ trained on `.rf3` data, shipped as one self-contained `.rf3m` file, that generat
 for any beam configuration inside the range it was trained on.
 
 ```text
-.rf3m ──load──▶ GPU-resident model ──infer──▶ engine-owned Vulkan / D3D12 buffer ──▶ shader
+.rf3m ──load──▶ GPU-resident model ──infer──▶ engine-owned Vulkan / D3D12 / D3D11 buffer ──▶ shader
                                          └──▶ GPUCartesianRadiationField ──▶ .rf3
 ```
 
@@ -24,14 +29,24 @@ trainer to be installed.
 
 ## Status
 
-Specification plus a working skeleton. The container codec, the descriptor type system, the
-RadFiled3D field subclass, the metadata conversion and the C ABI are implemented and tested (28
-tests); the execution backends and the graphics interop are declared, option-gated, and not yet
-implemented — a disabled backend throws an error naming the option that would enable it, never a
-silent fallback. See **[`HANDOFF.md`](HANDOFF.md)** for the work list.
+The container, the runtime and both foreign surfaces are implemented and tested. CI builds the
+default option set, the ONNX Runtime configuration and an ASan/UBSan run on every push; the GPU
+configurations are built and tested on developer hardware.
 
-See **[`requirements.md`](requirements.md)** for the full definition and
-**[`CLAUDE.md`](CLAUDE.md)** for the working rules.
+| Area | State |
+| --- | --- |
+| `.rf3m` container, descriptors, `PackageBuilder`, `rf3m` tool | implemented, tested |
+| Multi-stage composition: named buffers, stage ordering, per-stage weights | implemented, tested |
+| ONNX Runtime sessions — CPU, CUDA, TensorRT | implemented, tested on hardware |
+| CUDA kernel stages (PTX / cubin, driver API) | implemented, tested on hardware |
+| Vulkan → CUDA memory import | implemented, verified end to end on an RTX 5090 |
+| D3D12 → CUDA / TensorRT, D3D11 → CUDA / TensorRT | implemented; pairing and refusals tested on Linux |
+| DirectML (D3D12 as native memory, no import) | written, **never compiled** — Windows-only, needs a Windows build |
+| ROCm / MIGraphX (AMD) | declared and option-gated; every operation throws `FeatureDisabled` |
+| C ABI + Python module | implemented, tested |
+
+A disabled backend throws an error naming the CMake option that would enable it — never a silent
+fallback to a slower path.
 
 ## Build
 
@@ -63,12 +78,42 @@ The optional dependencies are exactly the accelerator backends, and all of them 
 | Option | Brings in |
 | --- | --- |
 | `RFNN_WITH_ONNX` | ONNX Runtime core — **fetched on demand** by CMake, no SDK install needed |
-| `RFNN_WITH_CUDA` / `RFNN_WITH_TENSORRT` | NVIDIA execution providers |
-| `RFNN_WITH_ROCM` | AMD (ROCm / MIGraphX) |
-| `RFNN_WITH_DIRECTML` | Windows, vendor-neutral |
-| `RFNN_WITH_VULKAN` / `RFNN_WITH_DX11` / `RFNN_WITH_DX12` | graphics memory interop — one option each, independent of the compute backend and of each other; none needs a graphics SDK |
-| `RFNN_WITH_CPU` | the portable execution provider (ON by default) |
-| `RFNN_BUILD_PYTHON` | the pybind11 extension module — **on by default** for a top-level build when Python headers are found |
+| `RFNN_WITH_CUDA` | the CUDA execution provider, and CUDA kernel stages through the driver API |
+| `RFNN_WITH_TENSORRT` | the TensorRT execution provider (same hardware family as CUDA) |
+| `RFNN_WITH_ROCM` | the ROCm / MIGraphX execution provider (AMD) |
+| `RFNN_WITH_DIRECTML` | the DirectML execution provider (Windows, vendor-neutral) |
+| `RFNN_WITH_VULKAN` | Vulkan external-memory interop |
+| `RFNN_WITH_DX11` | Direct3D 11 external-memory interop |
+| `RFNN_WITH_DX12` | Direct3D 12 external-memory interop |
+| `RFNN_WITH_CPU` | the portable execution provider (**ON** by default) |
+| `RFNN_BUILD_PYTHON` | the pybind11 extension module — **on** by default for a top-level build when Python headers are found |
+
+`RFNN_BUILD_TESTS`, `RFNN_BUILD_TOOLS`, `RFNN_BUILD_EXAMPLES` and `RFNN_INSTALL` default to on for a
+top-level build and off when the project is added as a subdirectory.
+
+### Graphics interop
+
+**Interop is a pair, and the two halves are chosen independently.** Sharing memory takes a graphics
+API on one side and a compute backend on the other, so no graphics option implies a compute one:
+
+| graphics ↓ / compute → | CUDA (NVIDIA) | ROCm / HIP (AMD) | DirectML | CPU |
+| --- | --- | --- | --- | --- |
+| **Vulkan** | external memory import | external memory import | ✗ | ✗ |
+| **D3D12** | external memory import | external memory import | native — no import | ✗ |
+| **D3D11** | external memory import | external memory import | ✗ | ✗ |
+
+Two things follow. Vulkan and D3D12 memory is shareable from an AMD card through HIP exactly as
+from an NVIDIA card through CUDA. And under the DirectML provider a D3D12 resource already *is* the
+provider's own memory, so the import is a no-op — the fast path on Windows needs no interop layer.
+
+**Graphics interop needs no graphics SDK.** Importing a Vulkan allocation or a D3D12 resource is an
+import call on a handle the renderer already exported, so none of `RFNN_WITH_VULKAN`,
+`RFNN_WITH_DX11` or `RFNN_WITH_DX12` links a loader or an SDK. Which pairing is in play is decided
+at **runtime**; an impossible pairing is `UnsupportedInterop`, which is a different error from a
+backend that merely was not compiled in.
+
+**D3D11 and D3D12 stay apart** rather than sharing a "DirectX" option: D3D12 imports once through
+external memory, D3D11 registers and maps per use.
 
 ### Targets
 
@@ -106,6 +151,33 @@ session->bind_output("flux", memory::host::MemoryRef::of(std::span(voxels)));
 session->bind_output("flux", std::make_shared<memory::dx12::MemoryRef>(resource, bytes));
 ```
 
+### Choosing the device
+
+A session runs on **one** device, and the caller chooses it. The graphics flow is import first, then
+take the device from the imported buffer — the renderer already decided which GPU its memory is on:
+
+```cpp
+memory::vk::ExternalMemory interop;                       // or memory::dx12:: / memory::dx11::
+auto imported = interop.import_buffer(exported, Backend::Cuda);
+auto session = load(package, Backend::Cuda, Device::of(*imported));   // or Device::ordinal(1)
+```
+
+The resolved device is used for everything: the execution provider, the buffers between stages, a
+kernel stage's module, and its weights. Memory from another device is refused at bind, naming both
+indices.
+
+### Several stages, one package
+
+A model may be more than one graph. The package records the **named buffers** between stages, the
+stages in execution order, and whether each runs `Once` per field or `PerQuery` — so a beam encoder
+whose result every voxel reuses runs once. A stage may read a buffer written by any strictly
+earlier stage; buffers are allocated when the grid is chosen and reused by every inference.
+
+A stage is an ONNX graph *or* a compiled kernel, and both are ordinary blocks in the container. One
+implementation is enough, and it need not be the portable one: a package carrying only
+`cuda_ptx:hashgrid` refuses unsupported hardware up front, naming every stage responsible, rather
+than failing somewhere in the middle of a frame.
+
 Authoring a package — every declared tensor is a name, a semantic, a shape and how to normalise it;
 a quantity this library has never heard of is an ordinary `output` call:
 
@@ -136,15 +208,29 @@ RadFiled3D::nn::c::Metadata model("model.rf3m");
 for (const auto& name : model.output_names()) { /* ... */ }
 ```
 
+The ABI carries the whole inference protocol — importing Vulkan, D3D12 and D3D11 memory included —
+and nothing throws across it; every entry point returns a status code.
+
 ## Python
 
-pybind11 + scikit-build-core, the same stack RadFiled3D uses:
+pybind11 + scikit-build-core, the same stack RadFiled3D uses. **The wheel extends RadFiled3D**: the
+distribution is `radfiled3d-nn` and it installs into RadFiled3D's own package directory, so
+`from RadFiled3D import nn` sits beside `from RadFiled3D import RadFiled3D` — the mirror of
+`<RadFiled3D/nn/deploy.hpp>` beside `<RadFiled3D/RadiationField.hpp>`.
 
 ```sh
-pip install .                                                        # CPU-only reader + PackageBuilder
-pip install --config-settings=cmake.define.RFNN_WITH_ONNX=ON .       # with the ONNX Runtime vendored
-pip install '.[torch]'                                               # + PyTorch export helpers
+pip install radfiled3d-nn          # the released wheel: ONNX Runtime vendored, no system ORT needed
+pip install '.[torch]'             # from source, + the PyTorch export helpers
 ```
+
+The submodules mirror the C++ namespaces:
+
+| Python | C++ | holds |
+| --- | --- | --- |
+| `RadFiled3D.nn.deploy` | `nn::deploy` | `PackageBuilder`, `read_metadata` |
+| `RadFiled3D.nn.inference` | `nn` (`core/`) | `Session`, `load_rf3m` |
+| `RadFiled3D.nn.memory` | `nn::memory` | `Memory` |
+| `RadFiled3D.nn` | `nn` | `version()`, `GPUCartesianRadiationField` |
 
 The wheel is self-contained: it carries the ONNX Runtime beside the extension module, which has an
 `$ORIGIN` RPATH, so an installed wheel needs no system ORT and no `LD_LIBRARY_PATH`. The `.pyi`
@@ -171,8 +257,19 @@ pkg.add_metric("air_kerma_smape", 0.043)
 pkg.write("model.rf3m")
 ```
 
-A model that factors into a beam encoder and a trunk is two `add_graph` calls. `torch` is optional
-and imported lazily — reading a package never pulls it in.
+Running one — a buffer is bound by pointer, and a torch CUDA tensor never leaves the GPU:
+
+```python
+from RadFiled3D.nn.inference import load_rf3m
+
+session = load_rf3m("model.rf3m", backend="cuda")
+session.bind_input("beam_direction", beam)      # numpy array or torch tensor
+session.bind_output("flux", out)                # a torch CUDA tensor binds as device memory
+session.infer()
+```
+
+`torch` is optional and imported lazily — reading a package never pulls it in, and the extension
+recognises a tensor by duck-typing rather than by importing torch.
 
 ## License
 
