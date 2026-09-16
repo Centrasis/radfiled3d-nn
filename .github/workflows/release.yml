@@ -1,55 +1,48 @@
-# Build, test, and publish radfiled3d-nn.
+# Tag -> test -> publish.
 #
-# Mirrors RadFiled3D's `package-test-publish.yml`: wheels are built with cibuildwheel on Linux and
-# `python -m build` on Windows, and publishing is Trusted Publishing (OIDC, `id-token: write`) with
-# no token in a secret.
+# A tag is a release. Everything that can fail runs first, and PyPI is written only if all of it
+# passed: `publish` needs every test job, so one red test means no release rather than a bad one.
 #
 # THE TAG IS THE VERSION, for the wheel and for the C++ library inside it. scikit-build-core takes
 # it from `build_tools/radfiled3d_nn_version.py` and passes it to CMake as SKBUILD_PROJECT_VERSION,
 # which `project(radfiled3d_nn VERSION ...)` uses — so `RadFiled3D.nn.version()`, `rfnn_version()`
-# and the wheel's own metadata are one number by construction. The plain C++ jobs below are handed
-# it as `-DRFNN_VERSION` for the same reason.
+# and the wheel's own metadata are one number by construction. The plain C++ jobs are handed it as
+# `-DRFNN_VERSION` for the same reason. Tag as `1.2.3`, with no `v` prefix: anything that does not
+# match `X.Y.Z` resolves to 0.0.0.
 #
-# WHAT RUNS WHEN, and why it differs from the reference:
-#
-#   every push   the C++ suite AND the Python suite. The reference gates its tests on a tag, which
-#                means an ordinary push proves nothing; the point of this workflow is to answer
-#                "does it build, do the tests pass" on every commit.
-#   tag only     publish to PyPI.
+# Publishing is Trusted Publishing (OIDC, `id-token: write`) — there is no API token to store,
+# leak or rotate. Configure the publisher on PyPI for this repository and this workflow file.
 #
 # WHAT CANNOT RUN HERE: the CUDA, TensorRT, DirectX and Vulkan configurations. A GitHub runner has
-# no GPU, so `build-cuda` / `build-trt` / `build-dx` are exercised on developer hardware only and
-# their cases are NOT counted by this workflow. What CI covers is the default build (no GPU, no ORT,
-# no SDK — the configuration that needs nothing but CMake and a C++20 compiler) and the ONNX one,
-# which is where sessions, composition and stage weights are actually driven.
-name: build, test, publish
+# no GPU, so those are exercised on developer hardware only and a green release does not speak for
+# them. What CI covers is the default build and the ONNX one, which is where sessions, composition
+# and stage weights are actually driven.
+name: release
 
-on: [push]
+on:
+  push:
+    tags: ['*']
 
 jobs:
   cpp:
-    name: C++ ${{ matrix.name }}
+    name: C++ tests (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # The default option set, which is the one requirements.md R-B2 promises: CMake and a
-          # C++20 compiler, nothing else.
+          # The default option set: CMake and a C++20 compiler, nothing else (R-B2).
           - name: default
             options: ""
-          # The configuration that can actually run a model: sessions, composition, stage weights,
-          # the external-initializer hand-off. Fetches the ONNX Runtime.
+          # The configuration that can actually run a model.
           - name: onnx
             options: "-DRFNN_WITH_ONNX=ON"
     steps:
       - uses: actions/checkout@v4
       - name: Configure
-        # The tag, so a tagged C++ build reports the release it is. Off a branch this resolves to
-        # 0.0.0, which is what a working tree that is not a release should say.
         run: >
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          -DRFNN_VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          -DRFNN_VERSION=${{ github.ref_name }}
           ${{ matrix.options }}
       - name: Build
         run: cmake --build build -j
@@ -96,12 +89,6 @@ jobs:
         run: |
           python -m pip install build
           python -m build --sdist
-      - name: Lint
-        run: |
-          python -m pip install flake8
-          # Syntax errors and undefined names fail the job; style is reported and does not.
-          python -m flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-          python -m flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
@@ -207,9 +194,8 @@ jobs:
         with:
           name: wheel-linux-${{ matrix.python-name }}
           path: dist/
-      # The wheel installs INTO RadFiled3D's package directory, so RadFiled3D must be there first —
-      # it is a declared dependency and pip pulls it, but installing the built wheel (rather than
-      # the source tree) is what proves the layout works as shipped.
+      # Installing the BUILT WHEEL rather than the source tree is what proves the layout works as
+      # shipped; RadFiled3D comes with it as a declared dependency.
       - name: Install the built wheel
         run: python -m pip install ./dist/*.whl
       - name: Check the namespace resolves as shipped
@@ -246,56 +232,14 @@ jobs:
           fail-on-empty: true
           title: Python ${{ matrix.python-version }}
 
-  status:
-    name: Status summary
-    runs-on: ubuntu-latest
-    needs: [cpp, cpp-sanitizers, sdist, wheels-linux, wheels-windows, test-python]
-    # `always()` so the summary is written even when something failed — a summary that only appears
-    # on success answers the question nobody needed to ask.
-    if: always()
-    steps:
-      # Checked out for `build_tools/radfiled3d_nn_version.py`, which the summary reads the declared
-      # version from.
-      - uses: actions/checkout@v4
-      - name: Report build, tests and the released version
-        run: |
-          {
-            echo "## radfiled3d-nn"
-            echo ""
-            echo "| what | result |"
-            echo "| --- | --- |"
-            echo "| C++ build + tests | ${{ needs.cpp.result }} |"
-            echo "| C++ sanitizers | ${{ needs.cpp-sanitizers.result }} |"
-            echo "| Source distribution | ${{ needs.sdist.result }} |"
-            echo "| Wheels (Linux) | ${{ needs.wheels-linux.result }} |"
-            echo "| Wheels (Windows) | ${{ needs.wheels-windows.result }} |"
-            echo "| Python tests | ${{ needs.test-python.result }} |"
-          } >> "$GITHUB_STEP_SUMMARY"
-          # The version currently on PyPI, for comparison with the tag being built. A 404 is the
-          # ordinary answer before the first release and must not fail the job.
-          published=$(curl -fsSL https://pypi.org/pypi/radfiled3d-nn/json 2>/dev/null \
-                      | python -c "import json,sys; print(json.load(sys.stdin)['info']['version'])" \
-                      2>/dev/null || echo "not published yet")
-          {
-            echo ""
-            echo "| | |"
-            echo "| --- | --- |"
-            echo "| latest on PyPI | \`$published\` |"
-            echo "| this ref | \`${GITHUB_REF##*/}\` |"
-            echo "| version being built | \`$(python -c "import sys; sys.path.insert(0,'build_tools'); import radfiled3d_nn_version as v; print(v.resolve_version())" 2>/dev/null || echo unknown)\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
-
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    # Only a release tag publishes, and only after everything that can fail has passed.
-    if: startsWith(github.ref, 'refs/tags/')
+    # Every test gates the release. One red job means no publish, not a bad publish.
     needs: [cpp, cpp-sanitizers, test-python, sdist, wheels-linux, wheels-windows]
     environment:
       name: pypi
       url: https://pypi.org/p/radfiled3d-nn
-    # Trusted Publishing: PyPI verifies this workflow's OIDC identity, so there is no API token to
-    # store, leak or rotate. Configure the publisher on PyPI for this repository and workflow file.
     permissions:
       id-token: write
     steps:

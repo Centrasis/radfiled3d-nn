@@ -1,0 +1,86 @@
+# Does it build? That is the whole question this workflow answers, and the badge in README.md
+# reports it.
+#
+# It runs on every branch push and pull request, NOT on tags: a tag is a release, and `release.yml`
+# builds, tests and publishes it. Splitting them this way keeps the badge honest — a green build
+# badge means the last push compiled, and nothing else is claimed for it.
+#
+# Tests deliberately do NOT run here. `ctest` and the Python suite gate the release, where a failure
+# must stop a publish; on a branch push the fast, unambiguous signal is whether the thing compiles.
+#
+# WHAT CANNOT RUN HERE: the CUDA, TensorRT, DirectX and Vulkan configurations. A GitHub runner has
+# no GPU. What CI covers is the default build (no GPU, no ORT, no SDK — the configuration
+# requirements.md R-B2 promises needs nothing but CMake and a C++20 compiler) and the ONNX one.
+name: build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# A newer push to the same branch makes an in-flight build irrelevant.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpp:
+    name: C++ ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            options: ""
+          - name: onnx
+            options: "-DRFNN_WITH_ONNX=ON"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.options }}
+      - name: Build
+        run: cmake --build build -j
+
+  wheel:
+    name: Wheel (${{ matrix.os }}, ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # The wheel build is a real build, not a packaging afterthought: it compiles the bindings and
+      # runs pybind11-stubgen against the built module, which is where a missing build requirement
+      # shows up. Building it on every push is what keeps that from being discovered at release.
+      - name: Build wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel --config-setting=cmake.define.RFNN_WITH_ONNX=ON
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: flake8
+        run: |
+          python -m pip install flake8
+          # Syntax errors and undefined names fail the job; style is reported and does not.
+          python -m flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          python -m flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics

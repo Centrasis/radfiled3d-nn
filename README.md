@@ -1,6 +1,7 @@
 # radfiled3d-nn
 
-[![build, test, publish](https://github.com/Centrasis/radfiled3d-nn/actions/workflows/build-test-publish.yml/badge.svg)](https://github.com/Centrasis/radfiled3d-nn/actions/workflows/build-test-publish.yml)
+[![build](https://github.com/Centrasis/radfiled3d-nn/actions/workflows/build.yml/badge.svg)](https://github.com/Centrasis/radfiled3d-nn/actions/workflows/build.yml)
+[![release](https://github.com/Centrasis/radfiled3d-nn/actions/workflows/release.yml/badge.svg)](https://github.com/Centrasis/radfiled3d-nn/actions/workflows/release.yml)
 [![PyPI](https://img.shields.io/pypi/v/radfiled3d-nn.svg)](https://pypi.org/project/radfiled3d-nn/)
 [![Python versions](https://img.shields.io/pypi/pyversions/radfiled3d-nn.svg)](https://pypi.org/project/radfiled3d-nn/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
