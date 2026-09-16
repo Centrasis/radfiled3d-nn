@@ -1,0 +1,18 @@
+# Build trees. Spelled out rather than `/build*/`, which also swallows `build_tools/` — the
+# directory holding the version provider `pyproject.toml` declares.
+/build/
+/build-*/
+/dist/
+/lib
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Packages written by the examples and the tests.
+*.rf3m
+*.rf3m.old
+
+# Generated into the package by the build: the extension, its stub, the vendored ONNX Runtime.
+python/RadFiled3D/nn/_rfnn*
+python/RadFiled3D/nn/libonnxruntime*
+python/RadFiled3D/nn/*.dll

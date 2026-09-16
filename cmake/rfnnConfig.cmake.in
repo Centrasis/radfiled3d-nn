@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+# The exported target is rfnn::c — the shared library carrying the C ABI (include/rfnn/c_api.h)
+# plus the header-only RAII wrapper (c_api.hpp). It is self-contained: RadFiled3D, BLAKE3 and every
+# enabled backend are linked into it, so a consumer needs no other package.
+#
+# The C++ API (rfnn::rfnn, rfnn::deploy) is consumed from source — add_subdirectory or
+# FetchContent — so that it is built with the consumer's own toolchain (requirements.md R-X2).
+include("${CMAKE_CURRENT_LIST_DIR}/rfnnTargets.cmake")
+check_required_components(rfnn)
