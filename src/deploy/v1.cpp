@@ -52,8 +52,9 @@ std::pair<byte_view, Reader> split(byte_view bytes) {
     if (!std::equal(kMagic.begin(), kMagic.end(), bytes.begin())) throw Exception::bad_magic("magic is not \"RF3M\"");
     Reader r(bytes.subspan(4));
     const std::uint32_t version = r.u32("file version");
-    // A V1 package is a legitimate input this build does not yet read, and a future version is one
-    // it genuinely cannot. Both are reported by number rather than misparsed.
+    // There is one container version, so anything else is a package this build cannot read: a
+    // newer producer, or a header corrupt past the magic. Reported by number rather than misparsed
+    // — the digest below would catch the corruption anyway, but not say what was wrong.
     if (version != kVersion) throw Exception::unsupported_version(version, kVersion);
     const byte_view digest = r.take(kDigestBytes, "digest");
     const auto computed = digest_of(bytes.subspan(kHeaderBytes - 8));

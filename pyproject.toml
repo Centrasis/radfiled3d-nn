@@ -19,7 +19,11 @@
 # only a match lets `GPUCartesianRadiationField.to_host_field()` return RadFiled3D's own
 # `CartesianRadiationField`. Widening or narrowing this without doing the same there breaks that
 # handover at run time, not at build time. (python/CMakeLists.txt covers the non-pip path.)
-requires = ["scikit-build-core>=0.10", "pybind11>=2.13", "pybind11-stubgen>=2.5"]
+# numpy is a BUILD requirement, not just a runtime one: pybind11 renders `py::array_t<float>` as
+# `numpy.typing.NDArray[numpy.float32]`, and pybind11-stubgen imports those names to resolve them.
+# Without numpy in the isolated build environment it fails with "Can't find/import 'numpy.float32'"
+# and `--exit-code` turns that into a failed wheel. At run time numpy arrives with RadFiled3D.
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13", "pybind11-stubgen>=2.5", "numpy>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -40,13 +44,19 @@ classifiers = [
 ]
 # RadFiled3D is REQUIRED, and not merely because the runtime produces its fields: this wheel installs
 # into RadFiled3D's own package directory so that `import RadFiled3D.nn` resolves (RadFiled3D ships a
-# regular package, so its `__path__` is one directory and a subpackage must live in it). The floor
-# matches RADFILED3D_TAG, the version the C++ side is compiled against — `to_host_field()` hands back
-# RadFiled3D's own `CartesianRadiationField` through a pybind type registry keyed by version and ABI.
-dependencies = ["RadFiled3D>=1.3.6"]
+# regular package, so its `__path__` is one directory and a subpackage must live in it).
+#
+# It is pinned EXACTLY, not floored. The extension is compiled against RADFILED3D_TAG
+# (cmake/RadFiled3D.cmake) and `to_host_field()` hands back RadFiled3D's own
+# `CartesianRadiationField` through a pybind11 type registry keyed by version and ABI — a different
+# RadFiled3D in site-packages registers a different type and the handover fails at RUN time, not at
+# install time. Move this and RADFILED3D_TAG together, never one alone.
+#
+# numpy is listed although RadFiled3D also requires it: `layer()` returns a `numpy.typing.NDArray`,
+# so it is a direct dependency of this package and should not rest on another's requirement.
+dependencies = ["RadFiled3D==1.3.6", "numpy>=2.0"]
 
 [project.optional-dependencies]
-numpy = ["numpy>=2.0"]
 # Exporting a PyTorch module to ONNX (RadFiled3D.nn.torch_export). Optional and lazily imported:
 # a consumer that only reads packages must not pay for a torch install. `onnx` is what lets the
 # exporter check that the graph really declares the tensor names the package promises.

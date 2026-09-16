@@ -3,7 +3,7 @@
 // Layout (little-endian throughout, requirements.md R-F1):
 //
 //   [4]   magic            "RF3M"
-//   [u32] version          the file version; 2 = this layout
+//   [u32] version          the file version; 1 = this layout (deploy::v1, kVersion)
 //   [32]  digest           BLAKE3 of every byte after this field
 //   [u64] metadata_bytes   skip this many to reach the first block
 //   [metadata_bytes]       provenance, I/O descriptors, geometry, metrics, RadFiled3D provenance
