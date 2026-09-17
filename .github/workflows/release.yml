@@ -34,9 +34,6 @@ jobs:
           # The default option set: CMake and a C++20 compiler, nothing else (R-B2).
           - name: default
             options: ""
-          # The configuration that can actually run a model.
-          - name: onnx
-            options: "-DRFNN_WITH_ONNX=ON"
     steps:
       - uses: actions/checkout@v4
       - name: Configure
@@ -136,9 +133,6 @@ jobs:
           # own type through the pybind11 registry.
           CIBW_BEFORE_ALL: "dnf install -y gcc-toolset-13-gcc gcc-toolset-13-gcc-c++"
           CIBW_ENVIRONMENT: "CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++"
-          # ONNX Runtime is fetched by CMake and vendored into the wheel, so a released wheel can run
-          # a model without the user installing anything (requirements.md R-P3).
-          CIBW_CONFIG_SETTINGS: "cmake.define.RFNN_WITH_ONNX=ON"
         with:
           output-dir: dist
       - uses: actions/upload-artifact@v4
@@ -170,7 +164,7 @@ jobs:
       - name: Build wheel
         run: |
           python -m pip install build
-          python -m build --wheel --config-setting=cmake.define.RFNN_WITH_ONNX=ON
+          python -m build --wheel
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-windows-${{ matrix.python-name }}

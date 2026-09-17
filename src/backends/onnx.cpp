@@ -4,9 +4,7 @@
 #include <RadFiled3D/nn/core/stage_weights.hpp>
 #include <RadFiled3D/nn/memory/memory_ref.hpp>
 
-#ifdef RFNN_WITH_ONNX
 #include <onnxruntime_cxx_api.h>
-#endif
 #ifdef RFNN_WITH_DIRECTML
 // Only in the DirectML ONNX Runtime package (NuGet), never in the GitHub release archives — which
 // is why cmake/OnnxRuntime.cmake fetches a different source for this backend. `d3d12.h` is needed
@@ -23,28 +21,18 @@
 
 namespace RadFiled3D::nn::onnx {
 
+// ONNX is inherently active as the whole use of this package is to use ONNX primarily
 bool available() noexcept {
-#ifdef RFNN_WITH_ONNX
     return true;
-#else
-    return false;
-#endif
 }
 
 std::optional<std::string> version() {
-#ifdef RFNN_WITH_ONNX
-    // Calling into ORT is deliberate: it is the smallest thing that proves the fetched runtime is
-    // actually linked and loadable, rather than merely present on disk.
     const OrtApiBase* base = OrtGetApiBase();
     if (!base) return std::nullopt;
     const char* v = base->GetVersionString();
     return v ? std::optional<std::string>(v) : std::nullopt;
-#else
-    return std::nullopt;
-#endif
 }
 
-#ifdef RFNN_WITH_ONNX
 namespace {
 
 /// One ORT environment per process, and DELIBERATELY NEVER DESTROYED.
@@ -745,15 +733,10 @@ private:
 };
 
 }  // namespace
-#endif
 
 std::unique_ptr<InferenceSession> load([[maybe_unused]] deploy::Package package,
                                        [[maybe_unused]] Backend backend, [[maybe_unused]] int device) {
-#ifdef RFNN_WITH_ONNX
     return std::make_unique<OrtSession>(std::move(package), backend, device);
-#else
-    throw Exception::feature_disabled("onnx", "building an inference session");
-#endif
 }
 
-}  // namespace RadFiled3D::nn::onnx
+}  

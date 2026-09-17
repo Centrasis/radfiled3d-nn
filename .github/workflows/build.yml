@@ -33,8 +33,6 @@ jobs:
         include:
           - name: default
             options: ""
-          - name: onnx
-            options: "-DRFNN_WITH_ONNX=ON"
     steps:
       - uses: actions/checkout@v4
       - name: Configure
@@ -68,7 +66,7 @@ jobs:
       - name: Build wheel
         run: |
           python -m pip install build
-          python -m build --wheel --config-setting=cmake.define.RFNN_WITH_ONNX=ON
+          python -m build --wheel
 
   lint:
     name: Lint

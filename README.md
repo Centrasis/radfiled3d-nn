@@ -53,8 +53,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release   # fetches RadFiled3D, glm, BLAK
 cmake --build build -j
 ```
 
-Accelerators are off by default: `-DRFNN_WITH_ONNX=ON` (fetches the ONNX Runtime), then any of
-`RFNN_WITH_CUDA`, `_TENSORRT`, `_ROCM`, `_DIRECTML` for compute and `RFNN_WITH_VULKAN`, `_DX11`,
+Accelerators are off by default: any of `RFNN_WITH_CUDA`, `_TENSORRT`, `_ROCM`, `_DIRECTML` for compute and `RFNN_WITH_VULKAN`, `_DX11`,
 `_DX12` for graphics-memory interop. The two halves are independent — no graphics option implies a
 compute one, and neither needs a graphics SDK installed.
 

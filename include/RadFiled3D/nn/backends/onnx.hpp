@@ -1,4 +1,4 @@
-// `RadFiled3D::nn::onnx` — the ONNX Runtime, fetched on demand by CMake and compiled in with RFNN_WITH_ONNX.
+// `RadFiled3D::nn::onnx` — the ONNX Runtime, fetched on demand by CMake and compiled.
 //
 // Declared and defined unconditionally, so a build without the option answers `false` / `nullopt`
 // instead of failing to link.

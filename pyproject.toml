@@ -1,13 +1,13 @@
 # Python packaging for radfiled3d-nn.
 #
 # The same stack RadFiled3D uses: scikit-build-core drives CMake (RFNN_BUILD_PYTHON=ON), which
-# fetches and builds RadFiled3D and BLAKE3 and — with RFNN_WITH_ONNX — fetches the ONNX Runtime and
+# fetches and builds RadFiled3D and BLAKE3 and fetches the ONNX Runtime and
 # vendors it into the package (requirements.md R-P3). A user therefore needs neither a RadFiled3D
 # checkout nor an SDK to `pip install` a released wheel; building from an sdist needs CMake and a
 # C++20 compiler, the same prerequisites RadFiled3D itself has.
 #
 #   pip install -v .
-#   pip install -v --config-settings=cmake.define.RFNN_WITH_ONNX=ON .
+#   pip install -v --config-settings=cmake.define.RFNN_WITH_CUDA=ON .
 #   pip wheel . -w dist
 [build-system]
 # pybind11-stubgen runs during the CMake build to extract _rfnn.pyi from the built module.

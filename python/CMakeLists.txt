@@ -99,10 +99,9 @@ endif()
 
 # ── install into the package ─────────────────────────────────────────────────────────────────────
 install(TARGETS _rfnn LIBRARY DESTINATION RadFiled3D/nn RUNTIME DESTINATION RadFiled3D/nn)
-if(RFNN_WITH_ONNX)
-  # What the loader opens, and nothing more (see cmake/OnnxRuntime.cmake).
-  install(FILES ${RFNN_ORT_RUNTIME_FILES} DESTINATION RadFiled3D/nn)
-  if(RFNN_ORT_SONAME_FILE)
-    install(FILES "${RFNN_ORT_SONAME_FILE}" DESTINATION RadFiled3D/nn RENAME "${RFNN_ORT_SONAME_NAME}")
-  endif()
+# What the loader opens, and nothing more (see cmake/OnnxRuntime.cmake).
+install(FILES ${RFNN_ORT_RUNTIME_FILES} DESTINATION RadFiled3D/nn)
+if(RFNN_ORT_SONAME_FILE)
+  install(FILES "${RFNN_ORT_SONAME_FILE}" DESTINATION RadFiled3D/nn RENAME "${RFNN_ORT_SONAME_NAME}")
 endif()
+

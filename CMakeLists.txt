@@ -60,7 +60,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-option(RFNN_WITH_ONNX     "Enable the ONNX Runtime core (fetched on demand)"       OFF)
 option(RFNN_WITH_CUDA     "Enable the CUDA execution provider"                   OFF)
 option(RFNN_WITH_TENSORRT "Enable the TensorRT execution provider"               OFF)
 option(RFNN_WITH_ROCM     "Enable the ROCm/MIGraphX execution provider (AMD)"    OFF)
@@ -103,9 +102,7 @@ if(RFNN_WITH_TENSORRT)
   set(RFNN_WITH_CUDA ON CACHE BOOL "" FORCE)
   set(ORT_GPU ON CACHE BOOL "" FORCE)
 endif()
-if(RFNN_WITH_CUDA OR RFNN_WITH_ROCM OR RFNN_WITH_DIRECTML)
-  set(RFNN_WITH_ONNX ON CACHE BOOL "" FORCE)
-endif()
+
 # DirectML executes on D3D12: its whole advantage is that a D3D12 resource is already its memory, and
 # that path is in the D3D12 backend.
 if(RFNN_WITH_DIRECTML)
@@ -164,19 +161,20 @@ target_link_libraries(rfnn PUBLIC rfnn_deploy libRadFiled3D)
 # Each enabled backend contributes its define and its libraries. The find_package calls are
 # deliberately REQUIRED: asking for a backend whose SDK is absent must fail at configure time with a
 # clear message, not produce a build that silently lacks it.
-if(RFNN_WITH_ONNX)
-  include(OnnxRuntime)
-  target_link_libraries(rfnn PUBLIC onnxruntime)
-  target_compile_definitions(rfnn PRIVATE RFNN_WITH_ONNX)
+include(OnnxRuntime)
+target_link_libraries(rfnn PUBLIC onnxruntime)
+
+if(RFNN_WITH_TENSORRT)
+  target_compile_definitions(rfnn PRIVATE RFNN_WITH_TENSORRT)
+  set(RFNN_WITH_CUDA ON)  # CUDA needs to be enabled anyway as tensorrt is used
 endif()
+
 if(RFNN_WITH_CUDA)
   find_package(CUDAToolkit REQUIRED)
   target_link_libraries(rfnn PUBLIC CUDA::cudart CUDA::cuda_driver)
   target_compile_definitions(rfnn PRIVATE RFNN_WITH_CUDA)
 endif()
-if(RFNN_WITH_TENSORRT)
-  target_compile_definitions(rfnn PRIVATE RFNN_WITH_TENSORRT)
-endif()
+
 if(RFNN_WITH_ROCM)
   find_package(hip REQUIRED)
   target_link_libraries(rfnn PUBLIC hip::host)
@@ -281,14 +279,14 @@ if(RFNN_INSTALL)
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
   install(FILES include/RadFiled3D/nn/c_api.h include/RadFiled3D/nn/c_api.hpp
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/RadFiled3D/nn)
-  if(RFNN_WITH_ONNX)
-    # The runtime the C ABI library opens at load; ships beside it.
-    install(FILES ${RFNN_ORT_RUNTIME_FILES} DESTINATION ${CMAKE_INSTALL_LIBDIR})
-    if(RFNN_ORT_SONAME_FILE)
-      install(FILES "${RFNN_ORT_SONAME_FILE}" DESTINATION ${CMAKE_INSTALL_LIBDIR} RENAME "${RFNN_ORT_SONAME_NAME}")
-    endif()
-    set_target_properties(rfnn_c PROPERTIES INSTALL_RPATH "$ORIGIN")
+
+  # The runtime the C ABI library opens at load; ships beside it.
+  install(FILES ${RFNN_ORT_RUNTIME_FILES} DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  if(RFNN_ORT_SONAME_FILE)
+    install(FILES "${RFNN_ORT_SONAME_FILE}" DESTINATION ${CMAKE_INSTALL_LIBDIR} RENAME "${RFNN_ORT_SONAME_NAME}")
   endif()
+  set_target_properties(rfnn_c PROPERTIES INSTALL_RPATH "$ORIGIN")
+
   install(EXPORT rfnnTargets NAMESPACE rfnn:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rfnn)
   configure_package_config_file(cmake/rfnnConfig.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/rfnnConfig.cmake"
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rfnn)
