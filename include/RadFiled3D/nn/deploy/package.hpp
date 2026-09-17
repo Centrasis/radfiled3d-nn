@@ -34,6 +34,7 @@
 #include <RadFiled3D/nn/deploy/codec.hpp>
 #include <RadFiled3D/nn/deploy/composition.hpp>
 #include <RadFiled3D/nn/deploy/descriptor.hpp>
+#include <RadFiled3D/nn/core/types.hpp>
 
 #include <array>
 #include <cstdint>

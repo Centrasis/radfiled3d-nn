@@ -8,41 +8,41 @@
 
 namespace RadFiled3D::nn {
 
-// ── FieldGeometry ─────────────────────────────────────────────────────────────────────────────────
+// ── CartesianFieldGeometry ─────────────────────────────────────────────────────────────────────────────────
 
-FieldGeometry FieldGeometry::make(std::array<std::uint32_t, 3> voxel_counts, std::array<float, 3> field_dimensions_m) {
+CartesianFieldGeometry CartesianFieldGeometry::make(std::array<std::uint32_t, 3> voxel_counts, std::array<float, 3> field_dimensions_m) {
     for (const auto c : voxel_counts)
         if (c == 0) throw Exception::invalid_argument("voxel counts must all be positive");
     // `<= 0` alone would let a NaN through.
     for (const float d : field_dimensions_m)
         if (!std::isfinite(d) || d <= 0.f) throw Exception::invalid_argument("field dimensions must all be positive");
-    return FieldGeometry{voxel_counts, field_dimensions_m};
+    return CartesianFieldGeometry{voxel_counts, field_dimensions_m};
 }
 
-FieldGeometry FieldGeometry::cubic(std::uint32_t resolution, float field_box_m) {
+CartesianFieldGeometry CartesianFieldGeometry::cubic(std::uint32_t resolution, float field_box_m) {
     return make({resolution, resolution, resolution}, {field_box_m, field_box_m, field_box_m});
 }
 
-std::array<float, 3> FieldGeometry::get_voxel_dimensions_m() const noexcept {
+std::array<float, 3> CartesianFieldGeometry::get_voxel_dimensions_m() const noexcept {
     return {field_dimensions_m[0] / static_cast<float>(voxel_counts[0]),
             field_dimensions_m[1] / static_cast<float>(voxel_counts[1]),
             field_dimensions_m[2] / static_cast<float>(voxel_counts[2])};
 }
 
-std::uint64_t FieldGeometry::get_voxel_count() const noexcept {
+std::uint64_t CartesianFieldGeometry::get_voxel_count() const noexcept {
     return static_cast<std::uint64_t>(voxel_counts[0]) * voxel_counts[1] * voxel_counts[2];
 }
 
-glm::vec3 FieldGeometry::get_field_dimensions() const noexcept {
+glm::vec3 CartesianFieldGeometry::get_field_dimensions() const noexcept {
     return {field_dimensions_m[0], field_dimensions_m[1], field_dimensions_m[2]};
 }
 
-glm::vec3 FieldGeometry::get_voxel_dimensions() const noexcept {
+glm::vec3 CartesianFieldGeometry::get_voxel_dimensions() const noexcept {
     const auto v = get_voxel_dimensions_m();
     return {v[0], v[1], v[2]};
 }
 
-glm::uvec3 FieldGeometry::get_voxel_counts() const noexcept { return {voxel_counts[0], voxel_counts[1], voxel_counts[2]}; }
+glm::uvec3 CartesianFieldGeometry::get_voxel_counts() const noexcept { return {voxel_counts[0], voxel_counts[1], voxel_counts[2]}; }
 
 }  // namespace RadFiled3D::nn
 
@@ -68,7 +68,7 @@ void check_positive(const glm::vec3& field_dimensions, const glm::vec3& voxel_di
             throw nn::Exception::invalid_argument("field and voxel dimensions must all be positive");
 }
 
-void check_derived_counts(const glm::uvec3& derived, const nn::FieldGeometry& geometry) {
+void check_derived_counts(const glm::uvec3& derived, const nn::CartesianFieldGeometry& geometry) {
     if (derived != geometry.get_voxel_counts())
         throw nn::Exception::invalid_argument("grid [" + std::to_string(geometry.voxel_counts[0]) + ", " +
                                       std::to_string(geometry.voxel_counts[1]) + ", " +
@@ -83,7 +83,7 @@ GPUCartesianRadiationField::GPUCartesianRadiationField(const glm::vec3& field_di
       voxel_counts_((check_positive(field_dimensions, voxel_dimensions), derive_counts(field_dimensions, voxel_dimensions))),
       field_dimensions_(field_dimensions) {}
 
-GPUCartesianRadiationField::GPUCartesianRadiationField(const nn::FieldGeometry& geometry)
+GPUCartesianRadiationField::GPUCartesianRadiationField(const nn::CartesianFieldGeometry& geometry)
     : GPUCartesianRadiationField(geometry.get_field_dimensions(), geometry.get_voxel_dimensions()) {
     check_derived_counts(voxel_counts_, geometry);
 }
@@ -105,8 +105,8 @@ std::shared_ptr<IRadiationField> GPUCartesianRadiationField::copy() const {
     return field;
 }
 
-nn::FieldGeometry GPUCartesianRadiationField::get_geometry() const {
-    return nn::FieldGeometry{{voxel_counts_.x, voxel_counts_.y, voxel_counts_.z},
+nn::CartesianFieldGeometry GPUCartesianRadiationField::get_geometry() const {
+    return nn::CartesianFieldGeometry{{voxel_counts_.x, voxel_counts_.y, voxel_counts_.z},
                              {field_dimensions_.x, field_dimensions_.y, field_dimensions_.z}};
 }
 
@@ -135,7 +135,7 @@ namespace RadFiled3D::nn {
 
 // ── host helpers ──────────────────────────────────────────────────────────────────────────────────
 
-std::shared_ptr<HostRadiationField> allocate_host_field(const FieldGeometry& geometry) {
+std::shared_ptr<HostRadiationField> allocate_host_field(const CartesianFieldGeometry& geometry) {
     auto field = std::make_shared<HostRadiationField>(geometry.get_field_dimensions(), geometry.get_voxel_dimensions());
     check_derived_counts(field->get_voxel_counts(), geometry);
     // RadFiled3D stores the voxel size verbatim, so this compares exactly; a difference would mean
@@ -145,14 +145,14 @@ std::shared_ptr<HostRadiationField> allocate_host_field(const FieldGeometry& geo
     return field;
 }
 
-std::shared_ptr<GPUCartesianRadiationField> allocate_gpu_field(const FieldGeometry& geometry) {
+std::shared_ptr<GPUCartesianRadiationField> allocate_gpu_field(const CartesianFieldGeometry& geometry) {
     return std::make_shared<GPUCartesianRadiationField>(geometry);
 }
 
-FieldGeometry get_geometry_of(const HostRadiationField& field) {
+CartesianFieldGeometry get_geometry_of(const HostRadiationField& field) {
     const glm::uvec3 c = field.get_voxel_counts();
     const glm::vec3 v = field.get_voxel_dimensions();
-    return FieldGeometry::make({c.x, c.y, c.z},
+    return CartesianFieldGeometry::make({c.x, c.y, c.z},
                                {static_cast<float>(c.x) * v.x, static_cast<float>(c.y) * v.y, static_cast<float>(c.z) * v.z});
 }
 

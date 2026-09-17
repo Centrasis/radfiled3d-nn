@@ -14,49 +14,7 @@
 #include <RadFiled3D/VoxelBuffer.hpp>
 #include <glm/vec3.hpp>
 
-#include <array>
-#include <cstdint>
-#include <filesystem>
-#include <map>
-#include <memory>
-#include <string>
-#include <string_view>
-
-namespace RadFiled3D::nn {
-
-/// Channel the runtime writes its prediction into, and the layers inside it. Shared constants so
-/// a producer and a consumer never have to agree on a name out of band.
-inline constexpr std::string_view kPredictionChannel = "prediction";
-inline constexpr std::string_view kFluxLayer = "flux";
-inline constexpr std::string_view kSpectrumLayer = "spectrum";
-
-/// A Cartesian voxel grid over a metric box.
-///
-/// The rule inherited from the training runtime: THE BOX IS METRIC AND THE VOXEL SIZE FOLLOWS FROM
-/// THE RESOLUTION, never the other way round. Constructing from a voxel size invites a grid that
-/// does not tile the box. `make` and `cubic` are the only constructors and both validate.
-struct FieldGeometry {
-    std::array<std::uint32_t, 3> voxel_counts{};
-    std::array<float, 3> field_dimensions_m{};
-
-    /// Throws `InvalidArgument` on a zero count or a non-positive / non-finite edge. A NaN edge
-    /// would otherwise silently poison every voxel coordinate derived from it.
-    static FieldGeometry make(std::array<std::uint32_t, 3> voxel_counts,
-                              std::array<float, 3> field_dimensions_m);
-    /// A cubic box, the common case for a trained field.
-    static FieldGeometry cubic(std::uint32_t resolution, float field_box_m);
-
-    std::array<float, 3> get_voxel_dimensions_m() const noexcept;
-    std::uint64_t get_voxel_count() const noexcept;
-
-    glm::vec3 get_field_dimensions() const noexcept;
-    glm::vec3 get_voxel_dimensions() const noexcept;
-    glm::uvec3 get_voxel_counts() const noexcept;
-
-    bool operator==(const FieldGeometry&) const = default;
-};
-
-}  // namespace RadFiled3D::nn
+#include <RadFiled3D/nn/core/types.hpp>
 
 // The field types belong to RadFiled3D itself, beside CartesianRadiationField and
 // PolarRadiationField: a generated field IS a RadFiled3D field (R-C1), so it is declared where
@@ -130,7 +88,7 @@ public:
 /// that only asks for counts and dimensions.
 class GPUCartesianRadiationField : public GPURadiationField<GPUVoxelBuffer> {
 public:
-    explicit GPUCartesianRadiationField(const nn::FieldGeometry& geometry);
+    explicit GPUCartesianRadiationField(const nn::CartesianFieldGeometry& geometry);
     GPUCartesianRadiationField(const glm::vec3& field_dimensions, const glm::vec3& voxel_dimensions);
 
     const std::string& get_typename() const override {
@@ -147,7 +105,7 @@ public:
     std::size_t get_voxel_count() const noexcept {
         return static_cast<std::size_t>(voxel_counts_.x) * voxel_counts_.y * voxel_counts_.z;
     }
-    nn::FieldGeometry get_geometry() const;
+    nn::CartesianFieldGeometry get_geometry() const;
 
     /// Copy every channel and layer into a plain host `CartesianRadiationField`, which
     /// `FieldStore::store` writes as `.rf3`. GPU mirrors are not transferred: the host data is the
@@ -172,11 +130,11 @@ using HostRadiationField = CartesianRadiationField;
 /// RadFiled3D derives its own voxel counts from `box / voxel size`; if they disagree with the
 /// requested counts the grid does not tile the box and every voxel index would be shifted, so the
 /// field is refused rather than returned.
-std::shared_ptr<HostRadiationField> allocate_host_field(const FieldGeometry& geometry);
-std::shared_ptr<GPUCartesianRadiationField> allocate_gpu_field(const FieldGeometry& geometry);
+std::shared_ptr<HostRadiationField> allocate_host_field(const CartesianFieldGeometry& geometry);
+std::shared_ptr<GPUCartesianRadiationField> allocate_gpu_field(const CartesianFieldGeometry& geometry);
 
 /// The geometry a RadFiled3D field actually has.
-FieldGeometry get_geometry_of(const HostRadiationField& field);
+CartesianFieldGeometry get_geometry_of(const HostRadiationField& field);
 
 /// Load a `.rf3` through RadFiled3D's own `FieldStore`. Refuses a polar field, which this Cartesian
 /// API cannot hold.

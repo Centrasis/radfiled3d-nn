@@ -9,6 +9,7 @@
 #include <numbers>
 
 using namespace RadFiled3D::nn::deploy;
+namespace rfnn = RadFiled3D::nn;
 
 int main() {
     constexpr double pi = std::numbers::pi;
@@ -19,6 +20,7 @@ int main() {
     PackageBuilder b;
     b.provenance("xray-scatter-v3", "radfield3d-nn 2.1", "G4EmStandardPhysics_option4")
         .created("2026-08-31T08:49:10Z")
+        //.field_geometry(rfnn::CartesianFieldGeometry::cubic(50, 1.f))
         .field_dimensions_m({1.f, 1.f, 1.f})
         .input("position", Semantic::Position, {3}).unit("m").normalizer(Linear01{0.0, 1.0}).done()
         .input("beam_direction", Semantic::BeamDirection, {2}).unit("rad")

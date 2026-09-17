@@ -123,6 +123,6 @@ private:
 ///
 /// Exposed because it is the one piece of A4 a caller may legitimately want on its own — to feed a
 /// model through a path this class does not cover, or to check what was queried.
-std::vector<float> make_voxel_center_positions(const FieldGeometry& geometry);
+std::vector<float> make_voxel_center_positions(const CartesianFieldGeometry& geometry);
 
 }  // namespace RadFiled3D::nn

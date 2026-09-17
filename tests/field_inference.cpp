@@ -37,7 +37,7 @@ namespace {
 constexpr std::uint32_t kNx = 2, kNy = 3, kNz = 4;
 constexpr std::size_t kVoxels = kNx * kNy * kNz;
 
-FieldGeometry test_geometry() { return FieldGeometry::make({kNx, kNy, kNz}, {1.f, 1.5f, 2.f}); }
+CartesianFieldGeometry test_geometry() { return CartesianFieldGeometry::make({kNx, kNy, kNz}, {1.f, 1.5f, 2.f}); }
 
 /// A package declaring exactly what `probe_graph()` consumes and produces.
 ///
@@ -70,7 +70,7 @@ std::shared_ptr<memory::MemoryRef> unit_direction(std::vector<float>& storage) {
 
 /// The voxel centre of flat index `q`, from the geometry alone — computed independently of the
 /// implementation so the two must agree rather than share a bug.
-std::array<float, 3> expected_center(std::size_t q, const FieldGeometry& geometry) {
+std::array<float, 3> expected_center(std::size_t q, const CartesianFieldGeometry& geometry) {
     const auto v = geometry.get_voxel_dimensions_m();
     const std::size_t x = q % kNx;
     const std::size_t y = (q / kNx) % kNy;
@@ -83,7 +83,7 @@ std::array<float, 3> expected_center(std::size_t q, const FieldGeometry& geometr
 // ── positions ─────────────────────────────────────────────────────────────────────────────────────
 
 TEST(FieldInference, PositionsAreVoxelCentresInRadFiled3DsFlatOrder) {
-    const FieldGeometry geometry = test_geometry();
+    const CartesianFieldGeometry geometry = test_geometry();
     const std::vector<float> positions = make_voxel_center_positions(geometry);
     ASSERT_EQ(positions.size(), kVoxels * 3);
 
@@ -209,7 +209,7 @@ TEST(FieldInference, AFieldThatDisagreesWithAWholeVolumeModelsGridIsRefused) {
 
     // The grid belongs to the MODEL here, not to the caller: filling a differently shaped field is
     // not a resize, it is a different field.
-    auto field = allocate_gpu_field(FieldGeometry::cubic(4, 1.f));
+    auto field = allocate_gpu_field(CartesianFieldGeometry::cubic(4, 1.f));
     try {
         FieldInference filler(session, field);
         ADD_FAILURE() << "a field of the wrong shape was accepted";
@@ -269,7 +269,7 @@ TEST(FieldInference, ANormalizedOutputReachesTheLayerInMetricUnits) {
     const std::shared_ptr<InferenceSession> session =
         onnx::load(normalized_flux_package(deploy::LogScale{kEpsilon, kScale}), Backend::Cpu, -1);
 
-    const FieldGeometry geometry = test_geometry();
+    const CartesianFieldGeometry geometry = test_geometry();
     auto field = allocate_gpu_field(geometry);
     FieldInference filler(session, field);
     std::vector<float> direction;
@@ -339,7 +339,7 @@ TEST(FieldInference, TheFieldHoldsExactlyWhatTheGraphComputedPerVoxel) {
     auto session = probe_session();
     if (!session) GTEST_SKIP() << "built without ONNX Runtime";
 
-    const FieldGeometry geometry = test_geometry();
+    const CartesianFieldGeometry geometry = test_geometry();
     auto field = allocate_gpu_field(geometry);
     FieldInference filler(session, field);
 
@@ -403,7 +403,7 @@ TEST(FieldInference, APredictionSurvivesToHostFieldAndTheRf3FileFormat) {
     auto session = probe_session();
     if (!session) GTEST_SKIP() << "built without ONNX Runtime";
 
-    const FieldGeometry geometry = test_geometry();
+    const CartesianFieldGeometry geometry = test_geometry();
     auto field = allocate_gpu_field(geometry);
     FieldInference filler(session, field);
 
@@ -443,7 +443,7 @@ TEST(FieldInference, SpectrumVoxelsReadBackThroughTheVoxelAccessor) {
     auto session = probe_session();
     if (!session) GTEST_SKIP() << "built without ONNX Runtime";
 
-    const FieldGeometry geometry = test_geometry();
+    const CartesianFieldGeometry geometry = test_geometry();
     auto field = allocate_gpu_field(geometry);
     FieldInference filler(session, field);
     std::vector<float> direction;
@@ -583,7 +583,7 @@ void expect_kernel_chain_runs(Backend backend) {
     constexpr std::size_t kQ = kSide * kSide * kSide;
     session->set_voxel_grid({kSide, kSide, kSide});
 
-    const auto positions = make_voxel_center_positions(FieldGeometry::cubic(kSide, 1.f));
+    const auto positions = make_voxel_center_positions(CartesianFieldGeometry::cubic(kSide, 1.f));
     std::vector<float> position(positions.begin(), positions.end());
     std::vector<float> direction{1.f, 1.f, 1.f}, flux(kQ, 0.f);
     session->bind_input("position", memory::host::MemoryRef::of(std::span<float>(position)));
@@ -645,7 +645,7 @@ TEST(FieldInference, ARepeatedInferenceOnAKernelChainAllocatesNothing) {
         onnx::load(kernel_chain_builder().build(), Backend::Cuda, 0);
     session->set_voxel_grid({2, 2, 2});
 
-    const auto positions = make_voxel_center_positions(FieldGeometry::cubic(2, 1.f));
+    const auto positions = make_voxel_center_positions(CartesianFieldGeometry::cubic(2, 1.f));
     std::vector<float> position(positions.begin(), positions.end());
     std::vector<float> direction{1.f, 1.f, 1.f}, first(8, 0.f), second(8, 0.f);
     session->bind_input("position", memory::host::MemoryRef::of(std::span<float>(position)));
@@ -870,7 +870,7 @@ TEST(FieldInference, AComposedPackageRunsItsStagesAndCarriesTheLatent) {
 
     const std::shared_ptr<InferenceSession> session =
         onnx::load(composed_builder().build(), Backend::Cpu, -1);
-    const FieldGeometry geometry = test_geometry();
+    const CartesianFieldGeometry geometry = test_geometry();
     auto field = allocate_gpu_field(geometry);
     FieldInference filler(session, field);
 
@@ -922,13 +922,13 @@ TEST(FieldInference, AComposedSessionSurvivesAChangeOfGrid) {
     // while the stages' ORT bindings still point into them. The clears have to happen first, and a
     // session that is only ever gridded once could not show it.
     for (const std::uint32_t side : {2u, 4u, 3u}) {
-        auto field = allocate_gpu_field(FieldGeometry::cubic(side, 1.f));
+        auto field = allocate_gpu_field(CartesianFieldGeometry::cubic(side, 1.f));
         FieldInference filler(session, field);
         std::vector<float> direction;
         session->bind_input("beam_direction", unit_direction(direction));
         filler.run();
 
-        const FieldGeometry geometry = field->get_geometry();
+        const CartesianFieldGeometry geometry = field->get_geometry();
         const float* flux = field->get_channel(std::string(kPredictionChannel))->get_layer<float>("flux");
         const auto voxels = static_cast<std::size_t>(geometry.get_voxel_count());
         for (std::size_t q = 0; q < voxels; ++q) {
@@ -1005,7 +1005,7 @@ TEST(FieldInference, ARealModelFillsARealField) {
     constexpr std::uint32_t kSide = 4;
     const std::shared_ptr<InferenceSession> session =
         onnx::load(deploy::Package::read_file(path), Backend::Cpu, -1);
-    auto field = allocate_gpu_field(FieldGeometry::cubic(kSide, 1.f));
+    auto field = allocate_gpu_field(CartesianFieldGeometry::cubic(kSide, 1.f));
     FieldInference filler(session, field);
 
     // The trunk's own inputs, which this package does not declare — see the D3 note below. A latent
@@ -1154,7 +1154,7 @@ TEST(FieldInference, TheV1InterfaceGapIsReportedAndNotSilent) {
 
     const std::shared_ptr<InferenceSession> session =
         onnx::load(deploy::Package::read_file(path), Backend::Cpu, -1);
-    FieldInference filler(session, allocate_gpu_field(FieldGeometry::cubic(2, 1.f)));
+    FieldInference filler(session, allocate_gpu_field(CartesianFieldGeometry::cubic(2, 1.f)));
 
     // Declared, and genuinely what a caller would reach for.
     EXPECT_NE(std::find(filler.get_caller_inputs().begin(), filler.get_caller_inputs().end(),

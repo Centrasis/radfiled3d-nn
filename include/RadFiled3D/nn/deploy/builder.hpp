@@ -92,6 +92,10 @@ public:
     PackageBuilder& created(std::string timestamp);
     /// The metric box that normalised positions span.
     PackageBuilder& field_dimensions_m(std::array<float, 3> dims);
+
+    // directly specify the field from the geometry class of the model
+    PackageBuilder& field_geometry(const CartesianFieldGeometry& geom);
+
     /// Record a fixed voxel grid. Only valid for a whole-volume model; `build()` rejects it on a
     /// model queried per position (R-F4).
     PackageBuilder& voxelization(std::array<std::uint32_t, 3> voxel_counts,

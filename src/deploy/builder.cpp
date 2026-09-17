@@ -49,6 +49,24 @@ PackageBuilder& PackageBuilder::voxelization(std::array<std::uint32_t, 3> voxel_
     return *this;
 }
 
+PackageBuilder& PackageBuilder::field_geometry(const CartesianFieldGeometry& geom)
+{
+    package_.geometry.field_dimensions_m = {
+        geom.get_field_dimensions().x,
+        geom.get_field_dimensions().y,
+        geom.get_field_dimensions().z
+    };
+    package_.geometry.voxelization = Voxelization{
+        {
+            geom.get_voxel_counts().x,
+            geom.get_voxel_counts().y,
+            geom.get_voxel_counts().z
+        },
+        geom.get_voxel_dimensions_m()
+    };
+    return *this;
+}
+
 TensorBuilder PackageBuilder::input(std::string name, Semantic semantic, std::vector<std::uint32_t> shape) {
     TensorDescriptor d;
     d.name = std::move(name);

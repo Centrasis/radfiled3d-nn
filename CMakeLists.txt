@@ -52,6 +52,7 @@ string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" _rfnn_version "${_rfnn_version}")
 project(radfiled3d_nn VERSION ${_rfnn_version} LANGUAGES CXX C)
 message(STATUS "radfiled3d-nn version ${PROJECT_VERSION}")
 
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -77,6 +78,22 @@ option(RFNN_WITH_CPU      "Enable the portable CPU execution provider"          
 # line, when it is not, which keeps R-B2 true: CMake and a C++20 compiler are still the only
 # prerequisites for the library, the tool and the tests.
 set(RFNN_BUILD_PYTHON_DEFAULT OFF)
+
+# Set CMAKE_PREFIX_PATH for Conda environment
+# This allows CMake to find Python development components in conda environments
+if(DEFINED ENV{CONDA_PREFIX})
+  list(APPEND CMAKE_PREFIX_PATH "$ENV{CONDA_PREFIX}")
+  list(APPEND CMAKE_PREFIX_PATH "$ENV{CONDA_PREFIX}/bin")
+  list(APPEND CMAKE_PREFIX_PATH "$ENV{CONDA_PREFIX}/lib")
+  message(STATUS "CMAKE_PREFIX_PATH: $ENV{CONDA_PREFIX}")
+endif()
+if(DEFINED ENV{CONDA_DEFAULT_ENV})
+  message(STATUS "Conda environment: $ENV{CONDA_DEFAULT_ENV}")
+  if(DEFINED CONDA_PREFIX)
+    message(STATUS "Conda prefix: $CONDA_PREFIX")
+  endif()
+endif()
+
 if(PROJECT_IS_TOP_LEVEL)
   find_package(Python QUIET COMPONENTS Interpreter Development.Module)
   if(Python_FOUND)
@@ -100,6 +117,10 @@ if(RFNN_WITH_TENSORRT)
   # which is the one carrying libonnxruntime_providers_{cuda,tensorrt}.so. The CPU archive has
   # neither, silently, so the fetch has to be forced here.
   set(RFNN_WITH_CUDA ON CACHE BOOL "" FORCE)
+endif()
+
+if(RFNN_WITH_TENSORRT OR RFNN_WITH_CUDA OR RFNN_WITH_DIRECTML OR RFNN_WITH_DX11 OR RFNN_WITH_DX12 OR RFNN_WITH_ROCM OR RFNN_WITH_VULKAN)
+  # if graphics backends are used, we obviously opt for using the GPU ORT variants
   set(ORT_GPU ON CACHE BOOL "" FORCE)
 endif()
 
@@ -125,11 +146,12 @@ add_library(rfnn_deploy STATIC
   src/deploy/v1.cpp
   src/deploy/builder.cpp)
 add_library(rfnn::deploy ALIAS rfnn_deploy)
+set_target_properties(rfnn_deploy PROPERTIES FOLDER "Library")
 target_include_directories(rfnn_deploy PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
   $<INSTALL_INTERFACE:include>)
-target_link_libraries(rfnn_deploy PRIVATE BLAKE3::blake3)
+target_link_libraries(rfnn_deploy PRIVATE BLAKE3::blake3 PUBLIC rfnn)
 target_compile_features(rfnn_deploy PUBLIC cxx_std_20)
 
 # ── rfnn::rfnn — the library ─────────────────────────────────────────────────────────────────────
@@ -156,7 +178,9 @@ add_library(rfnn STATIC
   src/backends/dx11.cpp
   src/backends/dx12.cpp)
 add_library(rfnn::rfnn ALIAS rfnn)
+set_target_properties(rfnn PROPERTIES FOLDER "Library")
 target_link_libraries(rfnn PUBLIC rfnn_deploy libRadFiled3D)
+set_target_properties(libRadFiled3D PROPERTIES FOLDER "thirdparty")
 
 # Each enabled backend contributes its define and its libraries. The find_package calls are
 # deliberately REQUIRED: asking for a backend whose SDK is absent must fail at configure time with a
@@ -166,7 +190,7 @@ target_link_libraries(rfnn PUBLIC onnxruntime)
 
 if(RFNN_WITH_TENSORRT)
   target_compile_definitions(rfnn PRIVATE RFNN_WITH_TENSORRT)
-  set(RFNN_WITH_CUDA ON)  # CUDA needs to be enabled anyway as tensorrt is used
+  set(RFNN_WITH_CUDA ON CACHE BOOL "" FORCE)
 endif()
 
 if(RFNN_WITH_CUDA)
@@ -202,7 +226,7 @@ if(RFNN_WITH_VULKAN)
   # on a file descriptor or NT handle the renderer already exported, so this library never calls a
   # Vulkan entry point and needs neither the loader nor the SDK. An engine plugin therefore does not
   # have to ship a Vulkan loader on our behalf. (The interop test links the loader — it plays the
-  # part of the engine, which is the one role that really does need Vulkan.)
+  # role of the engine, which is the one role that really does need Vulkan.)
   target_compile_definitions(rfnn PRIVATE RFNN_WITH_VULKAN)
 endif()
 foreach(_d3d 11 12)
@@ -231,6 +255,7 @@ endif()
 # linked in statically and hidden, so the binary is self-contained and its ABI is exactly c_api.h.
 add_library(rfnn_c SHARED src/capi/c_api.cpp)
 add_library(rfnn::c ALIAS rfnn_c)
+set_target_properties(rfnn_c PROPERTIES FOLDER "ffi")
 target_link_libraries(rfnn_c PRIVATE rfnn)
 target_include_directories(rfnn_c PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -251,10 +276,12 @@ endif()
 # ── tools, examples ──────────────────────────────────────────────────────────────────────────────
 if(RFNN_BUILD_TOOLS)
   add_executable(rf3m tools/rf3m.cpp)
+  set_target_properties(rf3m PROPERTIES FOLDER "targets")
   target_link_libraries(rf3m PRIVATE rfnn::deploy)
 endif()
 if(RFNN_BUILD_EXAMPLES)
   add_executable(write_sample examples/write_sample.cpp)
+  set_target_properties(write_sample PROPERTIES FOLDER "targets")
   target_link_libraries(write_sample PRIVATE rfnn::deploy)
 endif()
 
@@ -267,6 +294,15 @@ endif()
 # ── python ───────────────────────────────────────────────────────────────────────────────────────
 if(RFNN_BUILD_PYTHON)
   add_subdirectory(python)
+  set_target_properties(_rfnn PROPERTIES FOLDER "ffi")
+endif()
+
+# ── thirdparty packages ────────────────────────────────────────────────────────────────────────────
+set_target_properties(blake3 PROPERTIES FOLDER "thirdparty")
+set_target_properties(glm PROPERTIES FOLDER "thirdparty")
+if(RFNN_BUILD_TESTS)
+  set_target_properties(gtest PROPERTIES FOLDER "thirdparty")
+  set_target_properties(gtest_main PROPERTIES FOLDER "thirdparty")
 endif()
 
 # ── install / package ────────────────────────────────────────────────────────────────────────────

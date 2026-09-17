@@ -58,7 +58,7 @@ void add_output_layer(VoxelBuffer& buffer, const std::string& name, std::uint64_
 
 }  // namespace
 
-std::vector<float> make_voxel_center_positions(const FieldGeometry& geometry) {
+std::vector<float> make_voxel_center_positions(const CartesianFieldGeometry& geometry) {
     const auto counts = geometry.voxel_counts;
     const auto voxel = geometry.get_voxel_dimensions_m();
     std::vector<float> positions(geometry.get_voxel_count() * 3);
@@ -87,7 +87,7 @@ FieldInference::FieldInference(std::shared_ptr<InferenceSession> session,
     const deploy::Package& package = session_->get_package();
 
     kind_ = package.get_model_kind();
-    const FieldGeometry geometry = field_->get_geometry();
+    const CartesianFieldGeometry geometry = field_->get_geometry();
 
     // A whole-volume model's grid is the MODEL's, not the caller's: the architecture fixes it, and a
     // package that records one says so. Filling a field of another shape is not a resize, it is a

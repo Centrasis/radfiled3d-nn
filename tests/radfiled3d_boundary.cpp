@@ -13,7 +13,7 @@
 using namespace RadFiled3D::nn;
 
 TEST(RadFiled3DBoundary, AFieldHasExactlyTheRequestedGeometry) {
-    const FieldGeometry geometry = FieldGeometry::cubic(64, 1.f);
+    const CartesianFieldGeometry geometry = CartesianFieldGeometry::cubic(64, 1.f);
     EXPECT_EQ(geometry.get_voxel_dimensions_m(), (std::array<float, 3>{1.f / 64, 1.f / 64, 1.f / 64}));
     EXPECT_EQ(geometry.get_voxel_count(), 64u * 64 * 64);
 
@@ -30,7 +30,7 @@ TEST(RadFiled3DBoundary, AFieldHasExactlyTheRequestedGeometry) {
 /// rather than a field whose every voxel index is off by one.
 TEST(RadFiled3DBoundary, AnAcceptedFieldAlwaysHasExactlyTheRequestedGeometry) {
     for (const std::uint32_t resolution : {3u, 7u, 33u, 64u, 100u, 127u}) {
-        const FieldGeometry geometry = FieldGeometry::cubic(resolution, 1.f);
+        const CartesianFieldGeometry geometry = CartesianFieldGeometry::cubic(resolution, 1.f);
         try {
             EXPECT_EQ(get_geometry_of(*allocate_host_field(geometry)), geometry) << "resolution " << resolution;
         } catch (const Exception& err) {
@@ -40,9 +40,9 @@ TEST(RadFiled3DBoundary, AnAcceptedFieldAlwaysHasExactlyTheRequestedGeometry) {
 }
 
 TEST(RadFiled3DBoundary, ADegenerateGeometryIsRefusedBeforeItReachesRadFiled3D) {
-    EXPECT_THROW((void)FieldGeometry::make({0, 1, 1}, {1.f, 1.f, 1.f}), Exception);
-    EXPECT_THROW((void)FieldGeometry::make({1, 1, 1}, {0.f, 1.f, 1.f}), Exception);
-    EXPECT_THROW((void)FieldGeometry::make({1, 1, 1}, {1.f, std::nanf(""), 1.f}), Exception);
+    EXPECT_THROW((void)CartesianFieldGeometry::make({0, 1, 1}, {1.f, 1.f, 1.f}), Exception);
+    EXPECT_THROW((void)CartesianFieldGeometry::make({1, 1, 1}, {0.f, 1.f, 1.f}), Exception);
+    EXPECT_THROW((void)CartesianFieldGeometry::make({1, 1, 1}, {1.f, std::nanf(""), 1.f}), Exception);
 }
 
 /// The full round trip the module exists to make possible: a GPU field is filled, downloaded to a
@@ -52,7 +52,7 @@ TEST(RadFiled3DBoundary, ADegenerateGeometryIsRefusedBeforeItReachesRadFiled3D) 
 /// takes a `shared_ptr<IRadiationField>`, so a type that were merely *shaped like* a field could
 /// not be passed to it at all.
 TEST(RadFiled3DBoundary, AGpuFieldDownloadsAndStoresAsRf3) {
-    const FieldGeometry geometry = FieldGeometry::cubic(8, 1.f);
+    const CartesianFieldGeometry geometry = CartesianFieldGeometry::cubic(8, 1.f);
     auto gpu = allocate_gpu_field(geometry);
     EXPECT_EQ(gpu->get_voxel_counts(), glm::uvec3(8, 8, 8));
     EXPECT_EQ(gpu->get_geometry(), geometry);

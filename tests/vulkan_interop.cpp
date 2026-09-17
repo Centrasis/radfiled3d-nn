@@ -386,7 +386,7 @@ TEST(VulkanInterop, InferenceWritesIntoTheRenderersBuffer) {
     // a caller would fill through `FieldInference` — and it is what makes the flux vary across the
     // renderer's buffer instead of being one number repeated, which a broken position binding would
     // also produce.
-    const auto position = upload(make_voxel_center_positions(FieldGeometry::cubic(kSide, 1.f)), position_mem);
+    const auto position = upload(make_voxel_center_positions(CartesianFieldGeometry::cubic(kSide, 1.f)), position_mem);
     const auto latent = device_input(kQueries * 192, 0.01f, latent_mem);
     const auto region_state = device_input(14, 0.f, region_mem);
     const auto spectrum = device_input(kQueries * 32, 0.f, spectrum_mem);

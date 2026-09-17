@@ -607,7 +607,7 @@ PYBIND11_MODULE(_rfnn, m) {
         "voxels stay the source of truth; a device mirror is what inference writes into.")
         .def(py::init([](std::array<std::uint32_t, 3> voxel_counts,
                          std::array<float, 3> field_dimensions_m) {
-                 return allocate_gpu_field(FieldGeometry::make(voxel_counts, field_dimensions_m));
+                 return allocate_gpu_field(CartesianFieldGeometry::make(voxel_counts, field_dimensions_m));
              }),
              py::arg("voxel_counts"), py::arg("field_dimensions_m"),
              "Allocate a field. The box is METRIC and the voxel size follows from the resolution, "
