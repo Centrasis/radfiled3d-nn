@@ -5,7 +5,7 @@
 // one, but the type is always declared so a signature naming it still compiles.
 #pragma once
 
-#include <RadFiled3D/nn/memory/external_memory.hpp>
+#include <RadFiled3D/nn/memory/memory_ref.hpp>
 #include <RadFiled3D/nn/memory/memory_ref.hpp>
 
 namespace RadFiled3D::nn::memory::cuda {
@@ -75,10 +75,26 @@ void copy_device_to_device(memory::MemoryRef& dst, std::uint64_t dst_offset, con
 /// The returned reference OWNS the import: its destructor unmaps the buffer and destroys the
 /// external-memory handle, so the `shared_ptr`'s lifetime is the mapping's lifetime.
 ///
-/// Remember the handle asymmetry (`OpaqueFd` / `Win32Handle` in external_memory.hpp): a successful
+/// Remember the handle asymmetry (`OpaqueFd` / `Win32Handle` in memory_ref.hpp): a successful
 /// import consumes a POSIX fd and duplicates an NT handle.
 ///
 /// Throws `FeatureDisabled` without CUDA, `InvalidArgument` on a bad device or an unusable handle.
-std::shared_ptr<memory::MemoryRef> import_external_memory(const ExternalBuffer& buffer, int device);
+std::shared_ptr<memory::MemoryRef> import_external_memory(const ExternalOrigin& buffer, int device);
+
+/// Export memory THIS library allocated, so a graphics API can import it.
+///
+/// The other direction of `import_external_memory`, and the reason `allocate` uses the virtual
+/// memory API: a `cudaMalloc` pointer has no shareable handle and could never be shown to a
+/// renderer. This is what lets inference allocate its own output — because the caller bound none —
+/// and still have Vulkan or D3D12 display it without a copy.
+///
+/// Works on any reference carrying a `VmmOrigin`, which includes a session's intermediate stage
+/// buffers: they live as long as the model does, so exporting one is a legitimate way to watch what
+/// a stage produced.
+///
+/// **The caller owns the returned handle.** On Windows it is an NT handle to close; on Linux a file
+/// descriptor, and the importer consumes it. Throws `InvalidArgument` for memory that was imported
+/// rather than allocated here, or has no exportable origin at all.
+ExternalOrigin export_external_memory(const memory::MemoryRef& memory);
 
 }  // namespace RadFiled3D::nn::memory::cuda

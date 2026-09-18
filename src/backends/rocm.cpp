@@ -30,7 +30,7 @@ public:
         }
     }
 
-    std::shared_ptr<memory::MemoryRef> import_external_memory(const memory::ExternalBuffer&) const override {
+    std::shared_ptr<memory::MemoryRef> import_external_memory(const memory::ExternalOrigin&) const override {
         throw Exception::feature_disabled("rocm", "importing a graphics allocation");
     }
 

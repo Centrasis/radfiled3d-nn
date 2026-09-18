@@ -12,7 +12,7 @@
 #pragma once
 
 #include <RadFiled3D/nn/backends/dx12.hpp>
-#include <RadFiled3D/nn/memory/external_memory.hpp>
+#include <RadFiled3D/nn/memory/memory_ref.hpp>
 #include <RadFiled3D/nn/memory/memory_ref.hpp>
 
 namespace RadFiled3D::nn::memory::dx12 {
@@ -39,15 +39,5 @@ private:
     std::uint64_t offset_bytes_;
 };
 
-/// D3D12 interop through the modern external-memory path. Under CUDA or HIP the shared NT handle is
-/// imported once and yields a device pointer that stays valid; under DirectML nothing is imported at
-/// all, because the resource already is the provider's native memory.
-class ExternalMemory final : public memory::ExternalMemory {
-public:
-    Domain get_domain() const noexcept override { return Domain::D3D12; }
-    bool supports(Backend compute) const noexcept override;
-    std::shared_ptr<memory::MemoryRef> import_buffer(const ExternalBuffer& buffer, Backend compute) override;
-    ExternalBuffer export_buffer(std::uint64_t size_bytes, Backend compute) override;
-};
 
 }  // namespace RadFiled3D::nn::memory::dx12

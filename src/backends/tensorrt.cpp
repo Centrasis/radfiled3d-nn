@@ -30,7 +30,7 @@ public:
         return cuda::compute_backend().can_import_from(graphics);
     }
     std::shared_ptr<memory::MemoryRef> import_external_memory(
-        const memory::ExternalBuffer& buffer) const override {
+        const memory::ExternalOrigin& buffer) const override {
         return cuda::compute_backend().import_external_memory(buffer);
     }
     int get_device_count() const noexcept override {

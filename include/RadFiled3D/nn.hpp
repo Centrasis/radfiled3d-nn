@@ -11,8 +11,7 @@
 #include <RadFiled3D/nn/memory/cuda.hpp>
 #include <RadFiled3D/nn/memory/dx11.hpp>
 #include <RadFiled3D/nn/memory/dx12.hpp>
-#include <RadFiled3D/nn/memory/external_memory.hpp>
-#include <RadFiled3D/nn/memory/hip.hpp>
 #include <RadFiled3D/nn/memory/memory_ref.hpp>
+#include <RadFiled3D/nn/memory/hip.hpp>
 #include <RadFiled3D/nn/memory/vk.hpp>
 #include <RadFiled3D/nn/version.hpp>

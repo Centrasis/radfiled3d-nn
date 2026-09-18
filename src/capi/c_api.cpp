@@ -135,11 +135,11 @@ int32_t rfnn_metadata_tensor_is_output(const rfnn_metadata* handle, uint32_t ind
 
 namespace {
 
-/// Build an ExternalBuffer from the flat arguments a C caller can express.
-nn::memory::ExternalBuffer external_buffer(std::uint64_t size_bytes, std::uint64_t offset_bytes,
+/// Build an ExternalOrigin from the flat arguments a C caller can express.
+nn::memory::ExternalOrigin external_buffer(std::uint64_t size_bytes, std::uint64_t offset_bytes,
                                            std::uint64_t region_bytes, const std::uint8_t* device_uuid,
                                            bool dedicated) {
-    nn::memory::ExternalBuffer buffer;
+    nn::memory::ExternalOrigin buffer;
     buffer.size_bytes = size_bytes;
     buffer.offset_bytes = offset_bytes;
     buffer.region_bytes = region_bytes;
@@ -149,16 +149,20 @@ nn::memory::ExternalBuffer external_buffer(std::uint64_t size_bytes, std::uint64
     return buffer;
 }
 
-/// Import through whichever graphics backend owns `domain`. The C entry points differ only in how
-/// they name a handle; everything after that is one path.
-rfnn_status import_into(nn::memory::ExternalMemory& interop, const nn::memory::ExternalBuffer& buffer,
+/// Describe the exported allocation as a `MemoryRef` and let the backend adopt it. The C entry
+/// points differ only in how they name a handle; everything after that is one path, and it is the
+/// same path a C++ caller takes.
+rfnn_status import_into(nn::memory::Domain domain, nn::memory::ExternalOrigin origin,
                         const char* compute_backend, rfnn_memory** out) {
     if (out == nullptr) return fail(RFNN_INVALID_ARGUMENT, "import: null out parameter");
     *out = nullptr;
     if (compute_backend == nullptr) return fail(RFNN_INVALID_ARGUMENT, "import: null backend name");
     // The vocabulary is the C++ one; this ABI forwards a name and re-decides nothing (R-I3).
     const nn::Backend backend = nn::backend_from_name(compute_backend);
-    *out = new rfnn_memory{interop.import_buffer(buffer, backend)};
+    auto exported = std::make_shared<nn::memory::ExportedMemoryRef>(domain, std::move(origin));
+    // -1: the device is resolved from the allocation's UUID during the import, so the caller does
+    // not have to map a graphics UUID onto a compute ordinal.
+    *out = new rfnn_memory{nn::get_compute_backend(backend).adopt(std::move(exported), -1)};
     return RFNN_OK;
 }
 
@@ -237,8 +241,7 @@ rfnn_status rfnn_memory_import_vulkan_fd(int fd, uint64_t size_bytes, uint64_t o
     return guard([&]() -> rfnn_status {
         auto buffer = external_buffer(size_bytes, offset_bytes, region_bytes, device_uuid, dedicated != 0);
         buffer.handle = nn::memory::OpaqueFd{fd};
-        nn::memory::vk::ExternalMemory interop;
-        return import_into(interop, buffer, compute_backend, out);
+        return import_into(nn::memory::Domain::Vulkan, std::move(buffer), compute_backend, out);
     });
 }
 
@@ -249,8 +252,7 @@ rfnn_status rfnn_memory_import_vulkan_win32(void* handle, uint64_t size_bytes, u
     return guard([&]() -> rfnn_status {
         auto buffer = external_buffer(size_bytes, offset_bytes, region_bytes, device_uuid, dedicated != 0);
         buffer.handle = nn::memory::Win32Handle{handle};
-        nn::memory::vk::ExternalMemory interop;
-        return import_into(interop, buffer, compute_backend, out);
+        return import_into(nn::memory::Domain::Vulkan, std::move(buffer), compute_backend, out);
     });
 }
 
@@ -265,8 +267,7 @@ rfnn_status rfnn_memory_import_d3d12(void* shared_handle, rfnn_d3d12_kind kind, 
         buffer.handle = nn::memory::D3D12Handle{
             shared_handle, kind == RFNN_D3D12_HEAP ? nn::memory::D3D12Handle::Kind::Heap
                                                    : nn::memory::D3D12Handle::Kind::Resource};
-        nn::memory::dx12::ExternalMemory interop;
-        return import_into(interop, buffer, compute_backend, out);
+        return import_into(nn::memory::Domain::D3D12, std::move(buffer), compute_backend, out);
     });
 }
 
@@ -279,8 +280,7 @@ rfnn_status rfnn_memory_import_d3d11(void* shared_handle, rfnn_d3d11_kind kind, 
         buffer.handle = nn::memory::D3D11Handle{
             shared_handle, kind == RFNN_D3D11_KMT ? nn::memory::D3D11Handle::Kind::KmtHandle
                                                   : nn::memory::D3D11Handle::Kind::NtHandle};
-        nn::memory::dx11::ExternalMemory interop;
-        return import_into(interop, buffer, compute_backend, out);
+        return import_into(nn::memory::Domain::D3D11, std::move(buffer), compute_backend, out);
     });
 }
 
@@ -294,6 +294,8 @@ rfnn_status rfnn_memory_from_d3d12_resource(void* resource, uint64_t size_bytes,
         buffer.handle = nn::memory::D3D12NativeResource{resource};
         // Straight to the DirectML backend: this is the case where nothing is imported, so it does
         // not go through a graphics interop at all.
+        // Straight to DirectML: a D3D12 resource already IS that provider's memory, so `adopt`
+        // would have nothing to import — this is the one pairing where the import is a no-op.
         *out = new rfnn_memory{
             nn::get_compute_backend(nn::Backend::DirectMl).import_external_memory(buffer)};
         return RFNN_OK;

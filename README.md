@@ -123,6 +123,13 @@ auto session  = load(package, Backend::Cuda, Device::of(*imported));
 Link `rfnn::rfnn` from source, or `rfnn::c` for the C ABI (`<RadFiled3D/nn/c_api.h>`, plus a
 header-only RAII wrapper) when the consumer is a prebuilt plugin such as UE5.
 
+`rfnn::rfnn` joins three libraries, split by what a model is, where its memory lives, and how it
+runs: `rfnn::deploy` (loading and storing a package), `rfnn::core` (`nn::Model`, the backend
+interfaces, and host/device memory) and `rfnn::inference` (the concrete backends and the graphics
+interop). Linking `rfnn::deploy` alone gives a package reader that pulls in no execution provider,
+which is what lets a trainer or an inspection tool read and write `.rf3m` without an inference
+stack. RadFiled3D comes with all of them, so its own types are available too.
+
 ## The `.rf3m` format, version 1
 
 Little-endian throughout. `[str]` is `[u32 len][utf-8 bytes]`, not NUL-terminated.

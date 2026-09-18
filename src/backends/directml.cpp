@@ -36,7 +36,7 @@ public:
     /// being converted into some compute domain. That is the whole point of the pairing: on Windows
     /// it is the cheapest path there is, because it does no work at all.
     std::shared_ptr<memory::MemoryRef> import_external_memory(
-        const memory::ExternalBuffer& buffer) const override {
+        const memory::ExternalOrigin& buffer) const override {
         const auto* native = std::get_if<memory::D3D12NativeResource>(&buffer.handle);
         if (native == nullptr)
             // A SHARED handle would have to be opened with ID3D12Device::OpenSharedHandle before

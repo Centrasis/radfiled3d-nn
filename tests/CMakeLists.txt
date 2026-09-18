@@ -22,8 +22,9 @@ gtest_discover_tests(rf3m_roundtrip)
 add_executable(radfiled3d_boundary radfiled3d_boundary.cpp)
 set_target_properties(radfiled3d_boundary PROPERTIES FOLDER "tests")
 target_link_libraries(radfiled3d_boundary PRIVATE rfnn::rfnn GTest::gtest_main)
-# The test asserts that each probe answers what the build was configured with.
-foreach(backend ONNX CUDA VULKAN DX11 DX12)
+# The test asserts that each probe answers what the build was configured with. ONNX is absent from
+# this list deliberately: it has no option any more, so there is nothing for the test to mirror.
+foreach(backend CUDA VULKAN DX11 DX12)
   if(RFNN_WITH_${backend})
     target_compile_definitions(radfiled3d_boundary PRIVATE RFNN_TEST_WITH_${backend})
   endif()

@@ -20,6 +20,10 @@
 
 #include <gtest/gtest.h>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -910,6 +914,105 @@ TEST(FieldInference, AComposedStageIsRerunWhenItsInputChanges) {
     filler.run();
     const float second = field->get_channel(std::string(kPredictionChannel))->get_layer<float>("flux")[0];
     EXPECT_NEAR(second - first, 9.f, 1e-5f);
+}
+
+/// Skipping a stage reuses what it produced last time, with no copy and no rebinding.
+///
+/// This is the counterpart to `AComposedStageIsRerunWhenItsInputChanges`: there, editing the beam
+/// input reaches the trunk THROUGH the encoder and flux rises by 9. Here the encoder is switched
+/// off, so the latent buffer keeps the value the previous run left in it and the same edit changes
+/// nothing at all. That difference is the whole feature — a global state encoded once stays valid
+/// because the memory was never touched, not because anything was carried forward.
+/// Memory this library allocates is EXPORTABLE, which is why `allocate` uses the virtual-memory
+/// API rather than `cudaMalloc`.
+///
+/// The case it serves: inference allocated the output because the caller bound none, and a renderer
+/// still has to display it without a copy. A `cudaMalloc` pointer has no shareable handle at all,
+/// so this would be impossible; here the handle comes back and the allocation is genuinely
+/// importable by Vulkan or D3D12.
+TEST(FieldInference, MemoryAllocatedHereCanBeExportedToAGraphicsApi) {
+    if (!cuda::available()) GTEST_SKIP() << "built without CUDA";
+    const ComputeBackend& backend = get_compute_backend(Backend::Cuda);
+    if (backend.get_device_count() == 0) GTEST_SKIP() << "no CUDA device present";
+
+    auto memory = backend.allocate(4096, 0);
+    ASSERT_NE(memory, nullptr);
+    EXPECT_EQ(memory->get_size_bytes(), 4096u) << "the REQUESTED size, not the granularity-padded one";
+
+    const auto exported = memory::cuda::export_external_memory(*memory);
+    EXPECT_EQ(exported.mapped_bytes(), 4096u);
+#ifdef _WIN32
+    EXPECT_NE(std::get<memory::Win32Handle>(exported.handle).handle, nullptr);
+#else
+    const int fd = std::get<memory::OpaqueFd>(exported.handle).fd;
+    EXPECT_GE(fd, 0) << "a real file descriptor a renderer could import";
+    ::close(fd);  // nothing imported it, so this side still owns it
+#endif
+
+    // Memory that was IMPORTED cannot be re-exported: CUDA has no such call, which is exactly why a
+    // reference remembers its origin instead.
+    std::vector<float> host(8, 0.f);
+    EXPECT_THROW((void)memory::cuda::export_external_memory(*memory::host::MemoryRef::of(std::span<float>(host))),
+                 RadFiled3D::nn::Exception);
+}
+
+TEST(FieldInference, ASkippedStageKeepsWhatItLastWrote) {
+    if (!onnx::available()) GTEST_SKIP() << "built without ONNX Runtime";
+
+    const std::shared_ptr<InferenceSession> session =
+        onnx::load(composed_builder().build(), Backend::Cpu, -1);
+    auto field = allocate_gpu_field(test_geometry());
+    FieldInference filler(session, field);
+
+    std::vector<float> direction;
+    session->bind_input("beam_direction", unit_direction(direction));
+    filler.run();
+    const float first = field->get_channel(std::string(kPredictionChannel))->get_layer<float>("flux")[0];
+
+    EXPECT_TRUE(session->is_stage_enabled("beam_encoder"));
+    session->set_stage_enabled("beam_encoder", false);
+    EXPECT_FALSE(session->is_stage_enabled("beam_encoder"));
+
+    // The same edit that moved the result by 9 while the encoder ran.
+    direction.assign(3, 2.f);
+    filler.run();
+    const float frozen = field->get_channel(std::string(kPredictionChannel))->get_layer<float>("flux")[0];
+    EXPECT_NEAR(frozen, first, 1e-5f) << "a skipped encoder must leave its latent untouched";
+
+    // And switching it back on picks the change up, so this is a gate rather than a teardown.
+    session->set_stage_enabled("beam_encoder", true);
+    filler.run();
+    const float thawed = field->get_channel(std::string(kPredictionChannel))->get_layer<float>("flux")[0];
+    EXPECT_NEAR(thawed - first, 9.f, 1e-5f);
+}
+
+/// The intermediate buffers are reachable from outside, and they are the SAME memory across runs —
+/// which is what lets a caller read a stage's output, or hand it to another API.
+TEST(FieldInference, AStageBufferIsReachableAndStable) {
+    if (!onnx::available()) GTEST_SKIP() << "built without ONNX Runtime";
+
+    const std::shared_ptr<InferenceSession> session =
+        onnx::load(composed_builder().build(), Backend::Cpu, -1);
+    auto field = allocate_gpu_field(test_geometry());
+    FieldInference filler(session, field);
+
+    const auto names = session->get_stage_buffers();
+    ASSERT_FALSE(names.empty());
+    const auto& buffer = session->get_stage_buffer(names.front());
+    ASSERT_NE(buffer, nullptr);
+    const void* before = reinterpret_cast<const void*>(buffer->get_address());
+
+    std::vector<float> direction;
+    session->bind_input("beam_direction", unit_direction(direction));
+    filler.run();
+    filler.run();
+
+    // Allocated once when the grid was chosen and reused by every inference, so the address a
+    // caller kept stays the address the stage writes to.
+    EXPECT_EQ(reinterpret_cast<const void*>(session->get_stage_buffer(names.front())->get_address()),
+              before);
+    EXPECT_THROW((void)session->get_stage_buffer("no-such-buffer"), RadFiled3D::nn::Exception);
+    EXPECT_THROW(session->set_stage_enabled("no-such-stage", false), RadFiled3D::nn::Exception);
 }
 
 TEST(FieldInference, AComposedSessionSurvivesAChangeOfGrid) {

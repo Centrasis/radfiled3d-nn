@@ -17,12 +17,17 @@ using namespace RadFiled3D::nn;
 
 namespace {
 
+/// The graphics API this suite is about. Adoption is keyed on the domain, so it is named
+/// once here rather than at every call.
+constexpr auto kDomain = memory::Domain::D3D12;
+
+
 /// A handle value that is not null but names nothing — enough to get past the null check and reach
 /// the import, which is as far as any non-Windows host can go.
 void* fake_handle() { return reinterpret_cast<void*>(std::uintptr_t{0xd3d12}); }
 
-memory::ExternalBuffer d3d12_buffer(memory::D3D12Handle::Kind kind) {
-    memory::ExternalBuffer buffer;
+memory::ExternalOrigin d3d12_buffer(memory::D3D12Handle::Kind kind) {
+    memory::ExternalOrigin buffer;
     buffer.handle = memory::D3D12Handle{fake_handle(), kind};
     buffer.size_bytes = 4096;
     buffer.region_bytes = 4096;
@@ -50,19 +55,18 @@ TEST(D3D12Interop, TensorRtImportsThroughCudasMemory) {
 }
 
 TEST(D3D12Interop, ThePairingIsPossibleAndTheOptionIsWhatGatesIt) {
-    memory::dx12::ExternalMemory interop;
-    EXPECT_EQ(interop.get_domain(), memory::Domain::D3D12);
+    EXPECT_EQ(kDomain, memory::Domain::D3D12);
 
     // Possible in principle; whether it works here is a build question, and the two are different
     // questions on purpose.
     EXPECT_TRUE(get_compute_backend(Backend::TensorRt).can_import_from(memory::Domain::D3D12));
-    EXPECT_EQ(interop.supports(Backend::TensorRt), dx12::available() && tensorrt::available());
-    EXPECT_EQ(interop.supports(Backend::Cuda), dx12::available() && cuda::available());
+    EXPECT_EQ((get_compute_backend(Backend::TensorRt).can_import_from(kDomain) && is_available(Backend::TensorRt)), dx12::available() && tensorrt::available());
+    EXPECT_EQ((get_compute_backend(Backend::Cuda).can_import_from(kDomain) && is_available(Backend::Cuda)), dx12::available() && cuda::available());
 
     // The CPU provider is not a configuration mistake — no build option would ever make it work.
-    EXPECT_FALSE(interop.supports(Backend::Cpu));
+    EXPECT_FALSE((get_compute_backend(Backend::Cpu).can_import_from(kDomain) && is_available(Backend::Cpu)));
     try {
-        (void)interop.import_buffer(d3d12_buffer(memory::D3D12Handle::Kind::Resource), Backend::Cpu);
+        (void)get_compute_backend(Backend::Cpu).adopt(std::make_shared<memory::ExportedMemoryRef>(kDomain, d3d12_buffer(memory::D3D12Handle::Kind::Resource)), -1);
         FAIL() << "a D3D12 resource cannot reach the CPU provider";
     } catch (const Exception& err) {
         EXPECT_EQ(err.get_kind(), ErrorKind::UnsupportedInterop) << err.what();
@@ -72,12 +76,11 @@ TEST(D3D12Interop, ThePairingIsPossibleAndTheOptionIsWhatGatesIt) {
 /// A null handle is caught before CUDA sees it, whichever kind it claims to be.
 TEST(D3D12Interop, ANullHandleIsRefused) {
     if (!dx12::available() || !cuda::available()) GTEST_SKIP() << "D3D12 or CUDA compiled out";
-    memory::dx12::ExternalMemory interop;
     for (const auto kind : {memory::D3D12Handle::Kind::Resource, memory::D3D12Handle::Kind::Heap}) {
-        memory::ExternalBuffer buffer = d3d12_buffer(kind);
+        memory::ExternalOrigin buffer = d3d12_buffer(kind);
         buffer.handle = memory::D3D12Handle{nullptr, kind};
         try {
-            (void)interop.import_buffer(buffer, Backend::TensorRt);
+            (void)get_compute_backend(Backend::TensorRt).adopt(std::make_shared<memory::ExportedMemoryRef>(kDomain, buffer), -1);
             FAIL() << "a null D3D12 handle must not be imported";
         } catch (const Exception& err) {
             EXPECT_EQ(err.get_kind(), ErrorKind::InvalidArgument) << err.what();
@@ -91,10 +94,9 @@ TEST(D3D12Interop, ANullHandleIsRefused) {
 TEST(D3D12Interop, AResourceAndAHeapAreBothAccepted) {
     if (!dx12::available() || !cuda::available()) GTEST_SKIP() << "D3D12 or CUDA compiled out";
     if (cuda::get_device_count() == 0) GTEST_SKIP() << "no CUDA device";
-    memory::dx12::ExternalMemory interop;
     for (const auto kind : {memory::D3D12Handle::Kind::Resource, memory::D3D12Handle::Kind::Heap}) {
         try {
-            (void)interop.import_buffer(d3d12_buffer(kind), Backend::TensorRt);
+            (void)get_compute_backend(Backend::TensorRt).adopt(std::make_shared<memory::ExportedMemoryRef>(kDomain, d3d12_buffer(kind)), -1);
             // Would only succeed against a real handle on Windows.
         } catch (const Exception& err) {
             // The failure must come from CUDA rejecting the handle, never from this library

@@ -18,6 +18,7 @@
 #pragma once
 
 #include <RadFiled3D/nn/core/stage_weights.hpp>
+#include <RadFiled3D/nn/core/model.hpp>
 #include <RadFiled3D/nn/deploy/package.hpp>
 #include <RadFiled3D/nn/exception.hpp>
 #include <RadFiled3D/nn/memory/memory_ref.hpp>
@@ -26,6 +27,7 @@
 #include <cstdint>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 namespace RadFiled3D::nn {
 
@@ -75,7 +77,7 @@ bool can_share_graphics_memory(Backend backend) noexcept;
 ///     Device::ordinal(1)                  an explicit index
 ///
 /// **The graphics flow is: import first, then take the device from what you imported.** A renderer
-/// already decided which GPU its buffer lives on; `ExternalBuffer::device_uuid` carries that across
+/// already decided which GPU its buffer lives on; `ExternalOrigin::device_uuid` carries that across
 /// and `import_external_memory` resolves it to an ordinal. Passing the imported reference here makes
 /// the session land on the same card, which is the one arrangement that works — the alternative is a
 /// session on device 0 handed a pointer that only means something in device 1's context.
@@ -120,6 +122,11 @@ public:
     /// The package this session was built from — its declared inputs and outputs, training
     /// ranges, metrics and provenance travel with the running model.
     virtual const deploy::Package& get_package() const noexcept = 0;
+
+    /// What the session is running, as a model rather than as a container: the resolved
+    /// composition and the per-stage weights, alive for as long as the session is. A backend uses
+    /// this to build its stages; `get_package()` remains the way to ask a question about the file.
+    virtual const Model& get_model() const noexcept = 0;
     virtual Backend get_backend() const noexcept = 0;
     /// The device ordinal everything in this session runs on, resolved from the `Device` it was
     /// built with. Always a real index, never -1: `automatic()` resolves at construction.
@@ -148,6 +155,32 @@ public:
 
     /// Run. Reports EVERY missing binding at once rather than the first.
     virtual void infer() = 0;
+
+    /// The memory behind one of the composition's named buffers.
+    ///
+    /// These are allocated when the grid is chosen and live as long as the model stays loaded, so a
+    /// caller can read what a stage produced, keep it, or hand it to another API — the reference is
+    /// an ordinary `MemoryRef` in the backend's own domain, which is what `adopt` needs to give a
+    /// second view of it.
+    ///
+    /// Throws `not_found` for a name the composition does not declare; a package with no composition
+    /// has no such buffers at all.
+    virtual const std::shared_ptr<memory::MemoryRef>& get_stage_buffer(std::string_view buffer) const = 0;
+
+    /// Which named buffers exist, in the composition's order.
+    virtual std::vector<std::string> get_stage_buffers() const = 0;
+
+    /// Stop running a stage, or start again.
+    ///
+    /// A skipped stage is not executed and its output buffer is left EXACTLY as the last run left
+    /// it — which is the point: a global state encoded once by an earlier invocation stays valid
+    /// across later ones, and reusing it costs nothing because the memory never moved. No copy is
+    /// made and nothing is rebound.
+    ///
+    /// The stage must have run at least once first, or its buffer holds whatever the allocation
+    /// started as. Throws `not_found` for a stage the composition does not declare.
+    virtual void set_stage_enabled(std::string_view stage, bool enabled) = 0;
+    virtual bool is_stage_enabled(std::string_view stage) const = 0;
 
     /// A stage's parameters — the buffer every implementation of that stage reads.
     ///

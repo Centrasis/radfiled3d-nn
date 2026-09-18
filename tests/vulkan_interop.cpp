@@ -36,6 +36,11 @@ using namespace RadFiled3D::nn;
 
 namespace {
 
+/// The graphics API this suite is about. Adoption is keyed on the domain, so it is named
+/// once here rather than at every call.
+constexpr auto kDomain = memory::Domain::Vulkan;
+
+
 /// The slice of Vulkan a renderer would already have. Torn down in reverse on destruction.
 class VulkanHarness {
 public:
@@ -227,16 +232,14 @@ TEST(VulkanInterop, CudaWritesIntoAVulkanAllocation) {
     const auto fd = harness->export_fd();
     ASSERT_TRUE(fd.has_value()) << "vkGetMemoryFdKHR failed";
 
-    memory::ExternalBuffer buffer;
+    memory::ExternalOrigin buffer;
     buffer.handle = memory::OpaqueFd{*fd};   // consumed by the import; the harness must not close it
     buffer.size_bytes = harness->get_size_bytes();
     buffer.offset_bytes = 0;
     buffer.region_bytes = kBytes;
     buffer.device_uuid = harness->get_device_uuid();
-
-    memory::vk::ExternalMemory interop;
-    ASSERT_TRUE(interop.supports(Backend::Cuda));
-    const std::shared_ptr<memory::MemoryRef> imported = interop.import_buffer(buffer, Backend::Cuda);
+    ASSERT_TRUE((get_compute_backend(Backend::Cuda).can_import_from(kDomain) && is_available(Backend::Cuda)));
+    const std::shared_ptr<memory::MemoryRef> imported = get_compute_backend(Backend::Cuda).adopt(std::make_shared<memory::ExportedMemoryRef>(kDomain, buffer), -1);
     ASSERT_NE(imported, nullptr);
 
     // It comes back in the COMPUTE domain, because that is what a session can bind.
@@ -281,14 +284,12 @@ TEST(VulkanInterop, ReleasingTheReferenceReleasesTheImport) {
     for (int i = 0; i < 8; ++i) {
         const auto fd = harness->export_fd();
         ASSERT_TRUE(fd.has_value());
-        memory::ExternalBuffer buffer;
+        memory::ExternalOrigin buffer;
         buffer.handle = memory::OpaqueFd{*fd};
         buffer.size_bytes = harness->get_size_bytes();
         buffer.region_bytes = kBytes;
         buffer.device_uuid = harness->get_device_uuid();
-
-        memory::vk::ExternalMemory interop;
-        auto imported = interop.import_buffer(buffer, Backend::Cuda);
+        auto imported = get_compute_backend(Backend::Cuda).adopt(std::make_shared<memory::ExportedMemoryRef>(kDomain, buffer), -1);
         ASSERT_NE(imported, nullptr) << "import " << i << " failed";
     }
 }
@@ -301,15 +302,13 @@ TEST(VulkanInterop, AnAllocationFromAnotherDeviceIsRefused) {
 
     const auto fd = harness->export_fd();
     ASSERT_TRUE(fd.has_value());
-    memory::ExternalBuffer buffer;
+    memory::ExternalOrigin buffer;
     buffer.handle = memory::OpaqueFd{*fd};
     buffer.size_bytes = harness->get_size_bytes();
     buffer.region_bytes = kBytes;
     buffer.device_uuid.fill(0xab);  // a GPU neither API has ever seen
-
-    memory::vk::ExternalMemory interop;
     try {
-        (void)interop.import_buffer(buffer, Backend::Cuda);
+        (void)get_compute_backend(Backend::Cuda).adopt(std::make_shared<memory::ExportedMemoryRef>(kDomain, buffer), -1);
         FAIL() << "memory from an unknown device must not be imported";
     } catch (const Exception& err) {
         EXPECT_EQ(err.get_kind(), ErrorKind::InvalidArgument);
@@ -349,15 +348,13 @@ TEST(VulkanInterop, InferenceWritesIntoTheRenderersBuffer) {
     const auto fd = harness->export_fd();
     ASSERT_TRUE(fd.has_value());
 
-    memory::ExternalBuffer external;
+    memory::ExternalOrigin external;
     external.handle = memory::OpaqueFd{*fd};
     external.size_bytes = harness->get_size_bytes();
     external.region_bytes = kQueries * sizeof(float);
     external.device_uuid = harness->get_device_uuid();
-
-    memory::vk::ExternalMemory interop;
     // `flux` — the renderer's buffer, as an inference OUTPUT. This is the binding that matters.
-    const std::shared_ptr<memory::MemoryRef> flux = interop.import_buffer(external, Backend::Cuda);
+    const std::shared_ptr<memory::MemoryRef> flux = get_compute_backend(Backend::Cuda).adopt(std::make_shared<memory::ExportedMemoryRef>(kDomain, external), -1);
 
     auto session = load(package, Backend::Cuda, Device::of(*flux));
     EXPECT_EQ(session->get_device(), flux->get_device_index())
@@ -466,13 +463,12 @@ TEST(VulkanInterop, TensorRtWritesTheSameResultIntoTheRenderersBuffer) {
         const auto fd = harness->export_fd();
         if (!fd) return {};
 
-        memory::ExternalBuffer external;
+        memory::ExternalOrigin external;
         external.handle = memory::OpaqueFd{*fd};
         external.size_bytes = harness->get_size_bytes();
         external.region_bytes = kQueries * sizeof(float);
         external.device_uuid = harness->get_device_uuid();
-        memory::vk::ExternalMemory interop;
-        const auto flux = interop.import_buffer(external, Backend::Cuda);
+        const auto flux = get_compute_backend(Backend::Cuda).adopt(std::make_shared<memory::ExportedMemoryRef>(kDomain, external), -1);
 
         std::vector<void*> owned;
         auto device_input = [&owned](std::size_t floats, float fill) {

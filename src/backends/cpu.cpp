@@ -31,7 +31,7 @@ public:
     /// something that would not help.
     bool can_import_from(memory::Domain) const noexcept override { return false; }
 
-    std::shared_ptr<memory::MemoryRef> import_external_memory(const memory::ExternalBuffer&) const override {
+    std::shared_ptr<memory::MemoryRef> import_external_memory(const memory::ExternalOrigin&) const override {
         throw Exception::unsupported_interop("graphics", "cpu");
     }
 

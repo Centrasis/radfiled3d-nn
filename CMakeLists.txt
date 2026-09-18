@@ -133,11 +133,34 @@ endif()
 configure_file(include/RadFiled3D/nn/version.hpp.in
                "${CMAKE_CURRENT_BINARY_DIR}/generated/RadFiled3D/nn/version.hpp" @ONLY)
 
-# ── rfnn::deploy — the container ─────────────────────────────────────────────────────────────────
+# ── the libraries ────────────────────────────────────────────────────────────────────────────────
+#
+# Three static libraries and one joined target, in a DAG:
+#
+#     rfnn_deploy      the .rf3m container: loading and storing a model, plus the vocabulary that
+#                      description needs (Exception, the geometry types). BLAKE3 + RadFiled3D (glm).
+#     rfnn_core        what a model IS and where its memory lives: the `Model` base holding
+#                      everything a package describes, the Stage / InferenceSession / ComputeBackend
+#                      interfaces, and all of `memory/` — host and device references, and the
+#                      graphics interop that imports an engine's allocation.
+#     rfnn_inference   how a model RUNS: the concrete backends (ONNX Runtime, CUDA, TensorRT, ROCm,
+#                      DirectML) and the field-filling driver.
+#     rfnn             all three, joined. What an external consumer and the Python bindings link.
+#
+# The direction is deploy <- core <- inference and never reverses. `core` holds a `deploy::Package`
+# inside `Model`, which is why the container sits BELOW it rather than beside it; the vocabulary
+# lives with the container for the same reason, as the lowest thing both sides need.
+include(RadFiled3D)
 include(Blake3)
+include(OnnxRuntime)
+set_target_properties(libRadFiled3D PROPERTIES FOLDER "thirdparty")
 
+# ── rfnn::deploy — the container, and the vocabulary under it ────────────────────────────────────
+# Never gains ONNX Runtime or a backend: `rf3m` and `rf3m_roundtrip` link this alone, and their link
+# line carrying no `libonnxruntime` is what keeps defect D2 fixed.
 add_library(rfnn_deploy STATIC
   src/exception.cpp
+  src/types.cpp
   src/deploy/codec.cpp
   src/deploy/descriptor.cpp
   src/deploy/composition.cpp
@@ -147,27 +170,38 @@ add_library(rfnn_deploy STATIC
   src/deploy/builder.cpp)
 add_library(rfnn::deploy ALIAS rfnn_deploy)
 set_target_properties(rfnn_deploy PROPERTIES FOLDER "Library")
+# Declared here and inherited by everything downstream, so the include path is stated once.
 target_include_directories(rfnn_deploy PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
   $<INSTALL_INTERFACE:include>)
-target_link_libraries(rfnn_deploy PRIVATE BLAKE3::blake3 PUBLIC rfnn)
+# RadFiled3D is PUBLIC so that anyone linking any of these targets can use RadFiled3D itself, and so
+# that glm — which is RadFiled3D's to fetch — reaches `CartesianFieldGeometry`'s vec3 accessors
+# through one edge instead of each target naming it.
+target_link_libraries(rfnn_deploy PUBLIC libRadFiled3D PRIVATE BLAKE3::blake3)
 target_compile_features(rfnn_deploy PUBLIC cxx_std_20)
 
-# ── rfnn::rfnn — the library ─────────────────────────────────────────────────────────────────────
-include(RadFiled3D)
-
-add_library(rfnn STATIC
+# ── rfnn::core — the model and its memory ───────────────────────────────────────────────────────
+# No ONNX Runtime and no execution provider here either: this is the interface a backend implements
+# and the memory it will be handed, not any way of running anything.
+add_library(rfnn_core STATIC
+  src/core/model.cpp
   src/core/field.cpp
-  src/core/field_inference.cpp
   src/core/stage_weights.cpp
-  src/core/session.cpp
   src/core/rf3_metadata.cpp
   src/memory/memory_ref.cpp
-  src/memory/cuda.cpp
-  src/memory/vk.cpp
-  src/memory/dx12.cpp
-  src/memory/dx11.cpp
+  src/memory/adopt.cpp
+  # CUDA device memory: allocate, copy, and import a handle the renderer exported. Device-and-host
+  # memory handling, and it asks nothing of any execution provider, so it belongs here.
+  src/memory/cuda.cpp)
+add_library(rfnn::core ALIAS rfnn_core)
+set_target_properties(rfnn_core PROPERTIES FOLDER "Library")
+target_link_libraries(rfnn_core PUBLIC rfnn_deploy)
+
+# ── rfnn::inference — running it ────────────────────────────────────────────────────────────────
+add_library(rfnn_inference STATIC
+  src/core/session.cpp
+  src/core/field_inference.cpp
   src/backends/onnx.cpp
   src/backends/cpu.cpp
   src/backends/cuda.cpp
@@ -177,32 +211,38 @@ add_library(rfnn STATIC
   src/backends/vulkan.cpp
   src/backends/dx11.cpp
   src/backends/dx12.cpp)
-add_library(rfnn::rfnn ALIAS rfnn)
-set_target_properties(rfnn PROPERTIES FOLDER "Library")
-target_link_libraries(rfnn PUBLIC rfnn_deploy libRadFiled3D)
-set_target_properties(libRadFiled3D PROPERTIES FOLDER "thirdparty")
+add_library(rfnn::inference ALIAS rfnn_inference)
+set_target_properties(rfnn_inference PROPERTIES FOLDER "Library")
+target_link_libraries(rfnn_inference PUBLIC rfnn_core onnxruntime)
 
-# Each enabled backend contributes its define and its libraries. The find_package calls are
-# deliberately REQUIRED: asking for a backend whose SDK is absent must fail at configure time with a
-# clear message, not produce a build that silently lacks it.
-include(OnnxRuntime)
-target_link_libraries(rfnn PUBLIC onnxruntime)
+# Each enabled backend contributes its define and its libraries. Memory interop is compiled into
+# `rfnn_core`, so a define that reaches `src/memory/` has to be set on both targets — noted at each.
+# The find_package calls are deliberately REQUIRED: asking for a backend whose SDK is absent must
+# fail at configure time with a clear message, not produce a build that silently lacks it.
+# A backend's define has to reach BOTH libraries: its memory half is compiled into `rfnn_core`
+# (src/memory/) and its compute half into `rfnn_inference` (src/backends/). Setting it on one only
+# would compile the import path out while leaving the provider in, or the reverse — a build that
+# links but refuses interop at run time for no stated reason.
+function(rfnn_backend_define _define)
+  target_compile_definitions(rfnn_core PRIVATE ${_define})
+  target_compile_definitions(rfnn_inference PRIVATE ${_define})
+endfunction()
 
 if(RFNN_WITH_TENSORRT)
-  target_compile_definitions(rfnn PRIVATE RFNN_WITH_TENSORRT)
+  rfnn_backend_define(RFNN_WITH_TENSORRT)
   set(RFNN_WITH_CUDA ON CACHE BOOL "" FORCE)
 endif()
 
 if(RFNN_WITH_CUDA)
   find_package(CUDAToolkit REQUIRED)
-  target_link_libraries(rfnn PUBLIC CUDA::cudart CUDA::cuda_driver)
-  target_compile_definitions(rfnn PRIVATE RFNN_WITH_CUDA)
+  target_link_libraries(rfnn_core PUBLIC CUDA::cudart CUDA::cuda_driver)
+  rfnn_backend_define(RFNN_WITH_CUDA)
 endif()
 
 if(RFNN_WITH_ROCM)
   find_package(hip REQUIRED)
-  target_link_libraries(rfnn PUBLIC hip::host)
-  target_compile_definitions(rfnn PRIVATE RFNN_WITH_ROCM)
+  target_link_libraries(rfnn_core PUBLIC hip::host)
+  rfnn_backend_define(RFNN_WITH_ROCM)
 endif()
 if(RFNN_WITH_DIRECTML)
   # DirectML is a Windows API and the option stays Windows-only — unlike RFNN_WITH_DIRECTX, whose
@@ -219,7 +259,7 @@ if(RFNN_WITH_DIRECTML)
   # DirectML.dll that ORT will load; a newer one comes from the Microsoft.AI.DirectML NuGet package
   # under bin/x64-win/. That is a deployment choice, so it is not fetched here — the package is
   # ~200 MB because it carries every architecture including Xbox.
-  target_compile_definitions(rfnn PRIVATE RFNN_WITH_DIRECTML)
+  rfnn_backend_define(RFNN_WITH_DIRECTML)
 endif()
 if(RFNN_WITH_VULKAN)
   # Deliberately NO find_package(Vulkan): importing a Vulkan allocation is `cudaImportExternalMemory`
@@ -227,7 +267,7 @@ if(RFNN_WITH_VULKAN)
   # Vulkan entry point and needs neither the loader nor the SDK. An engine plugin therefore does not
   # have to ship a Vulkan loader on our behalf. (The interop test links the loader — it plays the
   # role of the engine, which is the one role that really does need Vulkan.)
-  target_compile_definitions(rfnn PRIVATE RFNN_WITH_VULKAN)
+  rfnn_backend_define(RFNN_WITH_VULKAN)
 endif()
 foreach(_d3d 11 12)
   if(RFNN_WITH_DX${_d3d})
@@ -242,13 +282,22 @@ foreach(_d3d 11 12)
       message(STATUS "RFNN_WITH_DX${_d3d} on a non-Windows host: the D3D${_d3d} import path is compiled "
                      "but cannot run, since a shared Direct3D handle only exists on Windows.")
     endif()
-    target_compile_definitions(rfnn PRIVATE RFNN_WITH_DX${_d3d})
+    rfnn_backend_define(RFNN_WITH_DX${_d3d})
   endif()
 endforeach()
 
 if(RFNN_WITH_CPU)
-  target_compile_definitions(rfnn PRIVATE RFNN_WITH_CPU)
+  rfnn_backend_define(RFNN_WITH_CPU)
 endif()
+
+# ── rfnn::rfnn — the three, joined ───────────────────────────────────────────────────────────────
+# What an external consumer links, and what the Python bindings link. INTERFACE rather than another
+# archive: the three libraries above already carry their own objects and usage requirements, so this
+# only has to name them. Linking `rfnn::rfnn` gets the container, the runtime and the vocabulary;
+# linking `rfnn::deploy` alone still gets just the container.
+add_library(rfnn INTERFACE)
+add_library(rfnn::rfnn ALIAS rfnn)
+target_link_libraries(rfnn INTERFACE rfnn_core rfnn_deploy rfnn_inference)
 
 # ── rfnn::c — the C ABI, as a shared library ─────────────────────────────────────────────────────
 # Only the rfnn_* symbols are visible; everything else — RadFiled3D, BLAKE3, the C++ API — is
@@ -283,6 +332,49 @@ if(RFNN_BUILD_EXAMPLES)
   add_executable(write_sample examples/write_sample.cpp)
   set_target_properties(write_sample PROPERTIES FOLDER "targets")
   target_link_libraries(write_sample PRIVATE rfnn::deploy)
+
+  # ── vk_raymarch — the interop demonstration ────────────────────────────────────────────────
+  # A renderer allocates the volume, inference writes into it, and a compute shader marches the
+  # SAME allocation. It needs what a renderer needs and the library deliberately does not: the
+  # Vulkan loader, and a shader compiler. Absent either, it is skipped with a status line rather
+  # than failing the build — the library itself still needs neither.
+  if(RFNN_WITH_VULKAN AND RFNN_WITH_CUDA)
+    find_package(Vulkan QUIET)
+    find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang)
+    if(Vulkan_FOUND AND GLSLANG_VALIDATOR)
+      set(_spv "${CMAKE_CURRENT_BINARY_DIR}/generated/raymarch_spv.h")
+      add_custom_command(
+        OUTPUT "${_spv}"
+        COMMAND "${GLSLANG_VALIDATOR}" -V --vn kRaymarchSpv -o "${_spv}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/examples/shaders/raymarch.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/shaders/raymarch.comp"
+        COMMENT "Compiling raymarch.comp to SPIR-V"
+        VERBATIM)
+      add_executable(vk_raymarch examples/vk_raymarch.cpp "${_spv}")
+      set_target_properties(vk_raymarch PROPERTIES FOLDER "targets")
+      target_include_directories(vk_raymarch PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+      target_link_libraries(vk_raymarch PRIVATE rfnn::rfnn Vulkan::Vulkan)
+      # A window, so the field can be explored rather than only dumped to a file. Xlib because its
+      # headers are already present and a window plus mouse events is all this needs — under a
+      # Wayland session XWayland serves it like any other X client. Without X11, the example still
+      # builds and runs with --offscreen.
+      # Looked up by hand rather than through find_package(X11): on this machine the headers live in
+      # a conda environment while the library is the system one, and FindX11 insists both come from
+      # the same prefix. Hint either with -DRFNN_X11_INCLUDE_DIR / -DRFNN_X11_LIBRARY.
+      find_path(RFNN_X11_INCLUDE_DIR X11/Xlib.h HINTS "$ENV{CONDA_PREFIX}/include")
+      find_library(RFNN_X11_LIBRARY NAMES X11 HINTS "$ENV{CONDA_PREFIX}/lib")
+      if(RFNN_X11_INCLUDE_DIR AND RFNN_X11_LIBRARY)
+        target_include_directories(vk_raymarch PRIVATE "${RFNN_X11_INCLUDE_DIR}")
+        target_link_libraries(vk_raymarch PRIVATE "${RFNN_X11_LIBRARY}")
+        message(STATUS "vk_raymarch: window through X11 (${RFNN_X11_LIBRARY})")
+      else()
+        target_compile_definitions(vk_raymarch PRIVATE RFNN_NO_PRESENT)
+        message(STATUS "vk_raymarch: no X11 headers or library, building offscreen-only")
+      endif()
+    else()
+      message(STATUS "vk_raymarch: skipped (needs the Vulkan loader and glslangValidator)")
+    endif()
+  endif()
 endif()
 
 # ── tests ────────────────────────────────────────────────────────────────────────────────────────

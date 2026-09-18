@@ -73,6 +73,14 @@ Provenance Provenance::decode(Reader& r) {
     return p;
 }
 
+std::optional<CartesianFieldGeometry> Geometry::get_field_geometry() const {
+    if (!voxelization) return std::nullopt;
+    // Built from the counts and the box rather than from the stored voxel edge lengths: those are
+    // derived (box / counts) and carrying them back would let a rounded value in the file override
+    // the relation `CartesianFieldGeometry` exists to keep.
+    return CartesianFieldGeometry::make(voxelization->voxel_counts, field_dimensions_m);
+}
+
 void Geometry::encode(Writer& w) const {
     for (const float v : field_dimensions_m) w.f32(v);
     if (!voxelization) {
@@ -339,13 +347,6 @@ void Package::validate() const {
                                          " composition blocks; a package composes exactly one way");
     if (const auto composition = get_composition())
         composition->validate(get_executable_block_names(), get_weights_block_names());
-
-    // A fixed voxelization only makes sense for a model that emits a whole volume; on a point field
-    // it would freeze a resolution the caller is supposed to choose (R-F4).
-    if (geometry.voxelization && is_voxelwise())
-        throw Exception::invalid_package(
-            "records a fixed voxelization but is queried per position; the inference grid is the "
-            "caller's choice");
 }
 
 // ── the façade ────────────────────────────────────────────────────────────────────────────────────

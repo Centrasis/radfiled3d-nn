@@ -20,7 +20,7 @@
 #pragma once
 
 #include <RadFiled3D/nn/backends/dx11.hpp>
-#include <RadFiled3D/nn/memory/external_memory.hpp>
+#include <RadFiled3D/nn/memory/memory_ref.hpp>
 #include <RadFiled3D/nn/memory/memory_ref.hpp>
 
 namespace RadFiled3D::nn::memory::dx11 {
@@ -45,15 +45,5 @@ private:
     std::uint64_t size_bytes_;
 };
 
-/// D3D11 interop through CUDA's external-memory path: a shared handle (NT or KMT) imported once,
-/// giving a device pointer that stays valid for the life of the reference — the same lifetime
-/// contract as Vulkan and D3D12, not a per-use map.
-class ExternalMemory final : public memory::ExternalMemory {
-public:
-    Domain get_domain() const noexcept override { return Domain::D3D11; }
-    bool supports(Backend compute) const noexcept override;
-    std::shared_ptr<memory::MemoryRef> import_buffer(const ExternalBuffer& buffer, Backend compute) override;
-    ExternalBuffer export_buffer(std::uint64_t size_bytes, Backend compute) override;
-};
 
 }  // namespace RadFiled3D::nn::memory::dx11

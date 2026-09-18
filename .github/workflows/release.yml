@@ -15,8 +15,8 @@
 #
 # WHAT CANNOT RUN HERE: the CUDA, TensorRT, DirectX and Vulkan configurations. A GitHub runner has
 # no GPU, so those are exercised on developer hardware only and a green release does not speak for
-# them. What CI covers is the default build and the ONNX one, which is where sessions, composition
-# and stage weights are actually driven.
+# them. What CI covers is the default build — which already carries ONNX Runtime, since that is not
+# optional — and so drives sessions, composition and stage weights.
 name: release
 
 on:
@@ -31,8 +31,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The default option set: CMake and a C++20 compiler, nothing else (R-B2).
-          - name: default
+          # CPU-only, which is the ONLY thing a GitHub runner can honestly test: it has no GPU.
+          # The empty option set is exactly that — ONNX Runtime on the CPU provider, no accelerator
+          # backend, no graphics SDK (R-B2). A step below asserts it rather than assuming it.
+          - name: cpu
             options: ""
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +43,21 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           -DRFNN_VERSION=${{ github.ref_name }}
           ${{ matrix.options }}
+      # CI HAS NO GPU, so it may only ever build the CPU-only configuration: ONNX Runtime on the
+      # CPU provider and no accelerator backend at all. That is already what the empty option set
+      # gives, but nothing said so — this fails loudly if a GPU option is ever switched on here,
+      # instead of producing a green badge for a configuration no runner can actually exercise.
+      # The GPU configurations are developer-hardware only (see CLAUDE.md).
+      - name: Confirm the configuration is CPU-only
+        run: |
+          for opt in CUDA TENSORRT ROCM DIRECTML VULKAN DX11 DX12; do
+            value=$(grep -E "^RFNN_WITH_$opt:BOOL=" build/CMakeCache.txt | cut -d= -f2)
+            if [ "$value" != "OFF" ]; then
+              echo "::error::RFNN_WITH_$opt=$value — a GitHub runner has no GPU; CI builds CPU-only"
+              exit 1
+            fi
+          done
+          echo "CPU-only: every accelerator backend is OFF, ONNX Runtime is on the CPU provider."
       - name: Build
         run: cmake --build build -j
       - name: Test

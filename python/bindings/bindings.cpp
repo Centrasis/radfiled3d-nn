@@ -384,8 +384,22 @@ PYBIND11_MODULE(_rfnn, m) {
                 b.voxelization(counts, dims);
             },
             py::arg("voxel_counts"), py::arg("voxel_dimensions_m"),
-            "Record a fixed voxel grid. Only valid for a whole-volume model; `write` rejects it on a model "
-            "queried per position.")
+            "Record the voxel grid. Valid for either model kind: prescriptive for a whole-volume model, "
+            "and the grid the training data had for one queried per position.")
+        .def(
+            "set_field_geometry",
+            [](PackageBuilder& b, std::array<std::uint32_t, 3> counts, std::array<float, 3> dims) {
+                // Through `make`, so a zero count or a non-finite edge is refused here rather than
+                // becoming a division by zero in whatever reads the package back.
+                b.field_geometry(CartesianFieldGeometry::make(counts, dims));
+            },
+            py::arg("voxel_counts"), py::arg("field_dimensions_m"),
+            "The metric box AND the voxel grid at once, from the geometry the model was trained with — "
+            "`set_field_dimensions` and `set_voxelization` in one call.\n\n"
+            "The voxel size follows from the box and the resolution (`box / counts`), never the other way "
+            "round, so only those two are given. `read_metadata` hands the same pair back under "
+            "`field_dimensions_m` and `voxelization`.\n\n"
+            "Raises ValueError for a zero voxel count or a non-positive or non-finite box edge.")
         .def(
             "add_input",
             [](PackageBuilder& b, const std::string& name, const std::string& semantic, std::vector<std::uint32_t> shape,

@@ -194,23 +194,32 @@ TEST(Rf3mRoundTrip, APackageWithNoRunnableTrunkIsRefused) {
     }
 }
 
-/// A fixed voxelization on a point-field model would freeze a resolution the caller is supposed to
-/// choose at inference time (R-F4).
-TEST(Rf3mRoundTrip, AVoxelizationIsRefusedOnAPerVoxelModel) {
+/// A voxelization is recorded by EITHER model kind, and it means different things in each (R-F4).
+///
+/// On a point-field model it is provenance: no network is trained on continuous simulation output,
+/// so the training grid is already learned into the weights — with undefined blending between
+/// voxels — whether or not the file admits it. Recording it is what lets a consumer know the
+/// resolution the model is actually meaningful at. It does NOT fix the inference grid: that stays
+/// the caller's, and `FieldInference` adopts a recorded grid only for a whole-volume model.
+TEST(Rf3mRoundTrip, AVoxelizationIsRecordedByEitherModelKind) {
     PackageBuilder point;
     point.field_dimensions_m({1.f, 1.f, 1.f})
         .voxelization({64, 64, 64}, {1.f / 64, 1.f / 64, 1.f / 64})
         .input("position", Semantic::Position, {3}).done()
         .output("flux", Semantic::Flux, {1}).done()
         .graph("trunk", b("onnx"));
-    try {
-        (void)point.build();
-        FAIL() << "a point field may not fix a grid";
-    } catch (const RadFiled3D::nn::Exception& err) {
-        EXPECT_NE(std::string(err.what()).find("voxelization"), std::string::npos);
-    }
+    const Package point_package = point.build();
+    EXPECT_TRUE(point_package.is_voxelwise());
+    ASSERT_TRUE(point_package.geometry.voxelization.has_value());
+    EXPECT_EQ(point_package.geometry.voxelization->voxel_counts,
+              (std::array<std::uint32_t, 3>{64, 64, 64}));
 
-    // The same voxelization on a whole-volume model is fine: there the grid IS the architecture.
+    // And it survives a round trip rather than being dropped on the way out.
+    const Package reread = Package::read(point_package.to_bytes());
+    ASSERT_TRUE(reread.geometry.voxelization.has_value());
+    EXPECT_EQ(reread.geometry.voxelization->voxel_counts, (std::array<std::uint32_t, 3>{64, 64, 64}));
+
+    // On a whole-volume model the same record is prescriptive: there the grid IS the architecture.
     PackageBuilder volume;
     volume.field_dimensions_m({1.f, 1.f, 1.f})
         .voxelization({64, 64, 64}, {1.f / 64, 1.f / 64, 1.f / 64})
@@ -221,6 +230,47 @@ TEST(Rf3mRoundTrip, AVoxelizationIsRefusedOnAPerVoxelModel) {
     EXPECT_FALSE(package.is_voxelwise());
     ASSERT_TRUE(package.geometry.voxelization.has_value());
     EXPECT_EQ(package.geometry.voxelization->voxel_counts, (std::array<std::uint32_t, 3>{64, 64, 64}));
+}
+
+/// A model's own geometry object goes into a package and comes back out unchanged, for EITHER
+/// model kind. `field_geometry` and `get_field_geometry` are the two halves of one round trip, so a
+/// trainer hands over the geometry it trained with and a consumer reads back the same object.
+TEST(Rf3mRoundTrip, AFieldGeometryRoundTripsThroughThePackage) {
+    const auto geometry = RadFiled3D::nn::CartesianFieldGeometry::make({32, 48, 64}, {0.5f, 0.75f, 1.f});
+
+    // The point-field shape: a `Position` input, which used to forbid a recorded grid.
+    PackageBuilder point;
+    point.field_geometry(geometry)
+        .input("position", Semantic::Position, {3}).done()
+        .output("flux", Semantic::Flux, {1}).done()
+        .graph("trunk", b("onnx"));
+    const Package point_package = Package::read(point.build().to_bytes());
+    ASSERT_TRUE(point_package.is_voxelwise());
+    ASSERT_TRUE(point_package.geometry.get_field_geometry().has_value());
+    EXPECT_EQ(*point_package.geometry.get_field_geometry(), geometry);
+
+    // And the whole-volume shape, where the same record also fixes the inference grid.
+    PackageBuilder volume;
+    volume.field_geometry(geometry)
+        .input("beam_direction", Semantic::BeamDirection, {2}).done()
+        .output("flux", Semantic::Flux, {32, 48, 64}).done()
+        .graph("trunk", b("onnx"));
+    const Package volume_package = Package::read(volume.build().to_bytes());
+    ASSERT_FALSE(volume_package.is_voxelwise());
+    ASSERT_TRUE(volume_package.geometry.get_field_geometry().has_value());
+    EXPECT_EQ(*volume_package.geometry.get_field_geometry(), geometry);
+}
+
+/// A box without a grid is not a geometry, and no resolution is invented to complete one.
+TEST(Rf3mRoundTrip, APackageWithNoVoxelizationHasNoFieldGeometry) {
+    PackageBuilder box_only;
+    box_only.field_dimensions_m({1.f, 1.f, 1.f})
+        .input("position", Semantic::Position, {3}).done()
+        .output("flux", Semantic::Flux, {1}).done()
+        .graph("trunk", b("onnx"));
+    const Package package = box_only.build();
+    EXPECT_FALSE(package.geometry.voxelization.has_value());
+    EXPECT_FALSE(package.geometry.get_field_geometry().has_value());
 }
 
 TEST(Rf3mRoundTrip, DeclaringBothSourceParameterisationsIsRefused) {

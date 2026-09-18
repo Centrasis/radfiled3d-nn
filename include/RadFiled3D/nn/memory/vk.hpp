@@ -10,7 +10,7 @@
 // rather than a raw device pointer.
 #pragma once
 
-#include <RadFiled3D/nn/memory/external_memory.hpp>
+#include <RadFiled3D/nn/memory/memory_ref.hpp>
 #include <RadFiled3D/nn/memory/memory_ref.hpp>
 
 namespace RadFiled3D::nn::memory::vk {
@@ -40,17 +40,5 @@ private:
     std::uint64_t offset_bytes_;
 };
 
-/// Vulkan interop. The engine exports its `VkDeviceMemory` as an opaque handle
-/// (`..._OPAQUE_FD_BIT` on Linux, `..._OPAQUE_WIN32_BIT` on Windows); the compute backend imports
-/// it — `cudaImportExternalMemory` on NVIDIA, `hipImportExternalMemory` on AMD — and inference
-/// writes the engine's memory in place. Neither vendor is privileged: the path is the same and only
-/// the import call differs.
-class ExternalMemory final : public memory::ExternalMemory {
-public:
-    Domain get_domain() const noexcept override { return Domain::Vulkan; }
-    bool supports(Backend compute) const noexcept override;
-    std::shared_ptr<memory::MemoryRef> import_buffer(const ExternalBuffer& buffer, Backend compute) override;
-    ExternalBuffer export_buffer(std::uint64_t size_bytes, Backend compute) override;
-};
 
 }  // namespace RadFiled3D::nn::memory::vk

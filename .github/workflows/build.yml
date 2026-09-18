@@ -10,7 +10,8 @@
 #
 # WHAT CANNOT RUN HERE: the CUDA, TensorRT, DirectX and Vulkan configurations. A GitHub runner has
 # no GPU. What CI covers is the default build (no GPU, no ORT, no SDK — the configuration
-# requirements.md R-B2 promises needs nothing but CMake and a C++20 compiler) and the ONNX one.
+# requirements.md R-B2 promises needs nothing but the toolchain and the network for ORT, which is
+# not optional and so needs no matrix entry of its own).
 name: build
 
 on:
@@ -31,12 +32,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: default
+          # CPU-only, which is the ONLY thing a GitHub runner can honestly test: it has no GPU.
+          # The empty option set is exactly that — ONNX Runtime on the CPU provider, no accelerator
+          # backend, no graphics SDK (R-B2). A step below asserts it rather than assuming it.
+          - name: cpu
             options: ""
     steps:
       - uses: actions/checkout@v4
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.options }}
+      # CI HAS NO GPU, so it may only ever build the CPU-only configuration: ONNX Runtime on the
+      # CPU provider and no accelerator backend at all. That is already what the empty option set
+      # gives, but nothing said so — this fails loudly if a GPU option is ever switched on here,
+      # instead of producing a green badge for a configuration no runner can actually exercise.
+      # The GPU configurations are developer-hardware only (see CLAUDE.md).
+      - name: Confirm the configuration is CPU-only
+        run: |
+          for opt in CUDA TENSORRT ROCM DIRECTML VULKAN DX11 DX12; do
+            value=$(grep -E "^RFNN_WITH_$opt:BOOL=" build/CMakeCache.txt | cut -d= -f2)
+            if [ "$value" != "OFF" ]; then
+              echo "::error::RFNN_WITH_$opt=$value — a GitHub runner has no GPU; CI builds CPU-only"
+              exit 1
+            fi
+          done
+          echo "CPU-only: every accelerator backend is OFF, ONNX Runtime is on the CPU provider."
       - name: Build
         run: cmake --build build -j
 

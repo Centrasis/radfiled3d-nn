@@ -14,7 +14,7 @@
 
 #include <RadFiled3D/nn/core/session.hpp>
 #include <RadFiled3D/nn/core/stage.hpp>
-#include <RadFiled3D/nn/memory/external_memory.hpp>
+#include <RadFiled3D/nn/memory/memory_ref.hpp>
 #include <RadFiled3D/nn/memory/memory_ref.hpp>
 
 #include <memory>
@@ -47,7 +47,26 @@ public:
     /// The backend resolves the device itself from `buffer.device_uuid`, so a caller never has to
     /// map a Vulkan UUID onto a compute ordinal. The returned reference owns the mapping.
     virtual std::shared_ptr<memory::MemoryRef> import_external_memory(
-        const memory::ExternalBuffer& buffer) const = 0;
+        const memory::ExternalOrigin& buffer) const = 0;
+
+    /// Make `memory` usable by THIS backend on `device`, whatever it currently is.
+    ///
+    /// The one call every bind path runs its input through, so no caller has to know what it is
+    /// holding:
+    ///
+    ///   * already this backend's domain, on this device -> handed straight back, no allocation and
+    ///     no copy. The common case, and it must stay free.
+    ///   * imported from a graphics API that can be imported again -> imported here too, giving a
+    ///     second view of THE SAME memory. Repeating the call returns the same reference rather than
+    ///     mapping it twice.
+    ///   * host memory -> handed back as it is. A runtime takes it with CPU memory info and does
+    ///     the transfer itself; this is how a caller passes positions in, and always was.
+    ///   * anything else -> throws, naming both domains and what would make it work.
+    ///
+    /// NOT virtual: it is expressed entirely in terms of `get_memory_domain` and
+    /// `import_external_memory`, so a new backend gets it by existing.
+    std::shared_ptr<memory::MemoryRef> adopt(std::shared_ptr<memory::MemoryRef> memory,
+                                             int device) const;
 
     /// How many devices of this backend are present. 1 for the CPU provider; 0 when the backend is
     /// compiled in but no usable driver or card is there. What `Device::ordinal` is checked against.

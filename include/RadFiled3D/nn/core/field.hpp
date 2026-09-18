@@ -14,7 +14,7 @@
 #include <RadFiled3D/VoxelBuffer.hpp>
 #include <glm/vec3.hpp>
 
-#include <RadFiled3D/nn/core/types.hpp>
+#include <RadFiled3D/nn/types.hpp>
 
 // The field types belong to RadFiled3D itself, beside CartesianRadiationField and
 // PolarRadiationField: a generated field IS a RadFiled3D field (R-C1), so it is declared where

@@ -34,7 +34,7 @@
 #include <RadFiled3D/nn/deploy/codec.hpp>
 #include <RadFiled3D/nn/deploy/composition.hpp>
 #include <RadFiled3D/nn/deploy/descriptor.hpp>
-#include <RadFiled3D/nn/core/types.hpp>
+#include <RadFiled3D/nn/types.hpp>
 
 #include <array>
 #include <cstdint>
@@ -176,16 +176,26 @@ struct Voxelization {
     bool operator==(const Voxelization&) const = default;
 };
 
-/// The metric box a normalised position maps into, and — only where the architecture genuinely
-/// fixes one — the voxel grid the model emits.
+/// The metric box a normalised position maps into, and the voxel grid behind the model.
 ///
-/// A voxelization is normally ABSENT: the inference grid is chosen by the caller from available
-/// GPU memory and varies across a dataset, so recording one would make a point-field model silently
-/// wrong at every other grid (R-F4). It is present only for a whole-volume model.
+/// THE VOXELIZATION MEANS TWO DIFFERENT THINGS, and which one depends on the model kind (R-F4).
+/// For a whole-volume model it is prescriptive: the grid is the architecture's and inference runs
+/// at it. For a point-field model it is descriptive — the grid the training data had. No network is
+/// trained on continuous simulation output, so that grid is already learned into the weights, with
+/// undefined blending between voxels; recording it tells a consumer the resolution the model is
+/// actually meaningful at. It still does not fix the inference grid, which stays the caller's.
 struct Geometry {
     /// Edge lengths in metres of the box that normalised positions span. Zero means unknown.
     std::array<float, 3> field_dimensions_m{};
     std::optional<Voxelization> voxelization;
+
+    /// The geometry as a `CartesianFieldGeometry` — the inverse of
+    /// `PackageBuilder::field_geometry`, so a model's own geometry object survives a write and a
+    /// read unchanged. EITHER model kind answers it, because either may record a grid (R-F4).
+    ///
+    /// `std::nullopt` when no voxelization was recorded: a box alone is not a grid, and inventing
+    /// a resolution to complete one would be the kind of plausible guess rule 9 forbids.
+    std::optional<CartesianFieldGeometry> get_field_geometry() const;
 
     bool operator==(const Geometry&) const = default;
 
@@ -262,7 +272,8 @@ struct Rf3Metadata {
 /// container records the kind, so nothing can disagree with the interface it declares.
 enum class ModelKind : std::uint8_t {
     /// Queried per point: the runtime supplies one position per voxel and the model answers for it.
-    /// The grid is the CALLER's choice, which is why a package like this may record no voxelization.
+    /// The inference grid is the CALLER's choice; a voxelization recorded here describes the grid
+    /// the model was TRAINED on and does not constrain it.
     /// PBRFNet and TPBRFNet are this shape — fully-connected networks over a coordinate.
     VoxelWise,
     /// Emits the whole field in one run, so the grid is the MODEL's, fixed by its architecture and

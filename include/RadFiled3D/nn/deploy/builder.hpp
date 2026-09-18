@@ -93,11 +93,12 @@ public:
     /// The metric box that normalised positions span.
     PackageBuilder& field_dimensions_m(std::array<float, 3> dims);
 
-    // directly specify the field from the geometry class of the model
+    /// Both of the above at once, from the geometry the model was trained with — the metric box
+    /// and the training voxel grid.
     PackageBuilder& field_geometry(const CartesianFieldGeometry& geom);
 
-    /// Record a fixed voxel grid. Only valid for a whole-volume model; `build()` rejects it on a
-    /// model queried per position (R-F4).
+    /// Record the voxel grid. Valid for either model kind: prescriptive for a whole-volume model,
+    /// and the grid the training data had for one queried per position (R-F4).
     PackageBuilder& voxelization(std::array<std::uint32_t, 3> voxel_counts,
                                  std::array<float, 3> voxel_dimensions_m);
 

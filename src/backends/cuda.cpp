@@ -106,7 +106,7 @@ public:
     }
 
     std::shared_ptr<memory::MemoryRef> import_external_memory(
-        const memory::ExternalBuffer& buffer) const override {
+        const memory::ExternalOrigin& buffer) const override {
         // Resolving the device here is why a graphics backend never has to know what a CUDA ordinal
         // is: it hands over the UUID its own API gave it and gets back bindable memory.
         return memory::cuda::import_external_memory(buffer, get_device_for_uuid(buffer.device_uuid));

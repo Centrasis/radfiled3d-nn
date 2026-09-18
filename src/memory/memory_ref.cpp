@@ -57,4 +57,20 @@ std::shared_ptr<memory::MemoryRef> allocate(std::uint64_t bytes) {
 
 }  // namespace host
 
+std::uint64_t ExportedMemoryRef::get_address() const noexcept {
+    // The native handle as a plain value, the same way every other reference here reports one. It
+    // is not a pointer: nothing may read through it until a backend has imported it.
+    return std::visit(
+        [](const auto& h) -> std::uint64_t {
+            using T = std::decay_t<decltype(h)>;
+            if constexpr (std::is_same_v<T, OpaqueFd>)
+                return static_cast<std::uint64_t>(h.fd);
+            else if constexpr (std::is_same_v<T, D3D12NativeResource>)
+                return reinterpret_cast<std::uintptr_t>(h.resource);
+            else
+                return reinterpret_cast<std::uintptr_t>(h.handle);
+        },
+        external().handle);
+}
+
 }  // namespace RadFiled3D::nn::memory

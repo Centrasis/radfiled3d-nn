@@ -186,13 +186,18 @@ def test_a_package_without_a_trunk_is_refused(tmp_path):
 # ── the two kinds of model ───────────────────────────────────────────────────────────────────────
 
 
-def test_a_voxelwise_model_may_not_fix_a_voxelization(tmp_path):
-    # A model queried per position leaves the grid to the caller, so recording one would make it
-    # silently wrong at every other grid.
+def test_a_voxelwise_model_records_the_grid_it_was_trained_on(tmp_path):
+    # A model queried per position leaves the INFERENCE grid to the caller, but the grid its
+    # training data had is already learned into the weights — no network is trained on continuous
+    # simulation output. Recording it is provenance, and it survives the round trip.
+    path = tmp_path / "point-field.rf3m"
     builder = describe()
     builder.set_voxelization([64, 64, 64], [0.015625, 0.015625, 0.015625])
-    with pytest.raises(ValueError, match="voxel"):
-        builder.write(str(tmp_path / "contradiction.rf3m"))
+    builder.write(str(path))
+
+    md = deploy.read_metadata(str(path))
+    assert md["voxelization"] is not None
+    assert list(md["voxelization"]["voxel_counts"]) == [64, 64, 64]
 
 
 def test_a_whole_volume_model_records_its_grid(tmp_path):
@@ -373,3 +378,53 @@ def test_weights_a_stage_declares_but_the_package_lacks_are_refused(tmp_path):
     builder.add_stage_weights("trunk", b"", elements=7)
     with pytest.raises(ValueError, match="weights"):
         builder.write(str(tmp_path / "phantom_weights.rf3m"))
+
+
+# ── set_field_geometry ───────────────────────────────────────────────────────────────────────────
+
+
+def _voxelwise_builder():
+    """A package queried per position — the shape `set_field_geometry` used to be refused for."""
+    b = deploy.PackageBuilder(dataset="geometry", software="test")
+    b.add_input("position", "position", [3], unit="m")
+    b.add_output("flux", "flux", [1])
+    b.add_graph("trunk", b"onnx-bytes")
+    return b
+
+
+def test_set_field_geometry_records_the_box_and_the_grid_together(tmp_path):
+    b = _voxelwise_builder()
+    b.set_field_geometry([32, 48, 64], [0.5, 0.75, 1.0])
+    path = tmp_path / "geometry.rf3m"
+    b.write(str(path))
+
+    md = deploy.read_metadata(str(path))
+    assert md["field_dimensions_m"] == pytest.approx([0.5, 0.75, 1.0])
+    assert md["voxelization"] is not None
+    assert list(md["voxelization"]["voxel_counts"]) == [32, 48, 64]
+    # The voxel size FOLLOWS from the box and the resolution; it is never given separately.
+    assert list(md["voxelization"]["voxel_dimensions_m"]) == pytest.approx(
+        [0.5 / 32, 0.75 / 48, 1.0 / 64]
+    )
+
+
+def test_a_voxelwise_model_may_record_the_grid_it_was_trained_on(tmp_path):
+    """No network is trained on continuous simulation output, so the training grid is already in the
+    weights whether or not the file admits it. Recording it is provenance, not a constraint: the
+    inference grid stays the caller's."""
+    b = _voxelwise_builder()
+    b.set_field_geometry([16, 16, 16], [1.0, 1.0, 1.0])
+    path = tmp_path / "point-field.rf3m"
+    b.write(str(path))          # would have raised before R-F4 was inverted
+    assert deploy.read_metadata(str(path))["voxelization"] is not None
+
+
+@pytest.mark.parametrize(
+    "counts,dims",
+    [([0, 4, 4], [1.0, 1.0, 1.0]),            # a zero count divides by zero downstream
+     ([4, 4, 4], [0.0, 1.0, 1.0]),            # a non-positive edge
+     ([4, 4, 4], [1.0, float("nan"), 1.0])],  # a NaN would poison every derived coordinate
+)
+def test_a_degenerate_geometry_is_refused(counts, dims):
+    with pytest.raises(ValueError):
+        _voxelwise_builder().set_field_geometry(counts, dims)

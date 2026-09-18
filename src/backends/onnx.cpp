@@ -14,6 +14,7 @@
 #endif
 
 #include <algorithm>
+#include <set>
 #include <map>
 #include <numeric>
 #include <string>
@@ -56,8 +57,8 @@ Ort::MemoryInfo memory_info_for(const memory::MemoryRef& ref, const ComputeBacke
         return Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
     // The allocator name comes FROM THE BACKEND, so this file names no backend of its own. A
     // reference must be in the running backend's own domain: a VkBuffer or an ID3D12Resource has to
-    // be imported first (memory::vk::ExternalMemory), and memory belonging to a different compute
-    // backend is not ours to bind either.
+    // have been adopted first (`ComputeBackend::adopt`, which the bind path runs), and memory
+    // belonging to a different compute backend is not ours to bind either.
     if (ref.get_domain() != backend.get_memory_domain())
         throw Exception::invalid_argument(
             std::string("cannot bind ") + std::string(memory::to_string(ref.get_domain())) +
@@ -262,7 +263,7 @@ struct SharedBuffer {
 class OrtSession final : public InferenceSession {
 public:
     OrtSession(deploy::Package package, Backend backend, int device)
-        : package_(std::move(package)), backend_(backend), compute_(get_compute_backend(backend)) {
+        : model_(std::move(package)), backend_(backend), compute_(get_compute_backend(backend)) {
         // Resolve the device ONCE, here, and use it for everything after: the execution provider,
         // the intermediate buffers, a kernel stage's module and its launches, and the weights
         // uploaded for it. A negative ordinal means "whatever the backend's current device is",
@@ -294,11 +295,15 @@ public:
                                       (count == 1 ? " device" : " devices")));
         }
 
-        // The composition names what runs and in what order. Without one there is one stage, so the
-        // rest of this class needs no second code path for the single-graph case.
-        composition_ = package_.get_composition();
-        if (composition_)
-            plan_ = composition_->stages;
+        // The composition names what runs and in what order. `Model` resolved it, along with the
+        // per-stage weights — including the bytes an ONNX graph's external initializers point at,
+        // which must be alive while the session is CONSTRUCTED and stay put for its whole life. A
+        // grid change does not alter what a model weighs.
+        //
+        // Without a composition there is one stage, so the rest of this class needs no second code
+        // path for the single-graph case.
+        if (model_.get_composition())
+            plan_ = model_.get_composition()->stages;
         else
             plan_.push_back({std::string(deploy::kTrunkGraph), deploy::Invocation::PerQuery, {}, {}, {}, {}});
 
@@ -309,25 +314,18 @@ public:
         // The backend's HARDWARE FAMILY, not its name: TensorRT and CUDA are two providers on one
         // card, and a `cuda_ptx` block runs under both.
         target_ = compute_.get_block_target();
-        package_.require_runnable_on(target_, arch_, to_string(backend_));
-
-        // The parameters, once, before any graph is built: an ONNX stage whose graph keeps its
-        // initializers outside itself needs them present while the session is CONSTRUCTED, not
-        // later. They then stay put for the life of the session — a grid change does not alter what
-        // a model weighs.
-        weights_ = load_stage_weights(package_);
+        model_.get_package().require_runnable_on(target_, arch_, to_string(backend_));
 
         for (const auto& declared : plan_) stages_.push_back(build_stage(declared, env, options));
     }
 
     ~OrtSession() override { release_dml_allocations(); }
 
-    const deploy::Package& get_package() const noexcept override { return package_; }
+    const deploy::Package& get_package() const noexcept override { return model_.get_package(); }
+    const Model& get_model() const noexcept override { return model_; }
 
     const StageWeights& get_stage_weights(std::string_view stage) const override {
-        for (const auto& w : weights_)
-            if (w.get_stage() == stage) return w;
-        throw Exception::not_found("stage", stage);
+        return model_.get_stage_weights(stage);
     }
 
     Backend get_backend() const noexcept override { return backend_; }
@@ -379,11 +377,47 @@ public:
         // was bound once, at set_voxel_grid, and points at memory this session owns and does not
         // move — so a run executes and replicates, and allocates nothing.
         for (const auto& stage : stages_) {
+            // A skipped stage is simply not run. Its output buffer still holds what the last run
+            // put there and every reader downstream sees that, which is the whole mechanism: a
+            // global state encoded once is reused by leaving it alone, not by copying it forward.
+            if (disabled_.contains(stage->get_name())) continue;
             stage->run();
             // A `Once` producer wrote one row; its consumers want one per query.
             for (const auto& buffer : buffers_)
                 if (buffer.writer == stage->get_name()) buffer.repeat(compute_);
         }
+    }
+
+    const std::shared_ptr<memory::MemoryRef>& get_stage_buffer(std::string_view name) const override {
+        for (const auto& buffer : buffers_)
+            if (buffer.name == name) return buffer.memory;
+        throw Exception::not_found("stage buffer", name);
+    }
+
+    std::vector<std::string> get_stage_buffers() const override {
+        std::vector<std::string> names;
+        names.reserve(buffers_.size());
+        for (const auto& buffer : buffers_) names.push_back(buffer.name);
+        return names;
+    }
+
+    void set_stage_enabled(std::string_view stage, bool enabled) override {
+        // Checked against the PLAN, so a typo is refused rather than silently doing nothing — a
+        // skip that quietly failed would show up as a stale result nobody could explain.
+        const bool known = std::any_of(plan_.begin(), plan_.end(),
+                                       [&](const deploy::Stage& s) { return s.name == stage; });
+        if (!known) throw Exception::not_found("stage", stage);
+        if (enabled)
+            disabled_.erase(std::string(stage));
+        else
+            disabled_.insert(std::string(stage));
+    }
+
+    bool is_stage_enabled(std::string_view stage) const override {
+        const bool known = std::any_of(plan_.begin(), plan_.end(),
+                                       [&](const deploy::Stage& s) { return s.name == stage; });
+        if (!known) throw Exception::not_found("stage", stage);
+        return !disabled_.contains(std::string(stage));
     }
 
 private:
@@ -470,7 +504,7 @@ private:
     /// ONLY form for that stage, which is exactly the case it was added for.
     std::unique_ptr<Stage> build_stage(const deploy::Stage& declared, Ort::Env& env,
                                        Ort::SessionOptions& options) {
-        if (const auto graph = package_.get_graph(declared.name)) {
+        if (const auto graph = model_.get_package().get_graph(declared.name)) {
             // One SessionOptions serves every stage — the provider list is a property of the device
             // this session runs on, not of the individual graph — EXCEPT for a graph that keeps its
             // initializers in an external file. That is per graph, so such a stage gets a clone with
@@ -495,7 +529,7 @@ private:
         // device. Pick the most specific form — `select_block` prefers an exact architecture match
         // over a portable one — and take the launch descriptor for THAT form, not for whichever the
         // stage happens to list first: a cubin and the PTX beside it need not share an entry point.
-        const deploy::Block* block = package_.select_block(declared.name, target_, arch_);
+        const deploy::Block* block = model_.get_package().select_block(declared.name, target_, arch_);
         if (block == nullptr)
             throw Exception::invalid_package("stage `" + declared.name +
                                              "` has no form this device can run");
@@ -506,11 +540,11 @@ private:
                 "stage `" + declared.name + "` selects its " + std::string(block->kind.get_name()) +
                 " form, but declares no launch descriptor for it; a kernel cannot be called without "
                 "an entry point");
-        if (!composition_)
+        if (!model_.get_composition())
             throw Exception::invalid_package("a stage that is compiled code needs a composition to "
                                              "say what it reads and writes");
         std::unique_ptr<Stage> stage =
-            compute_.make_kernel_stage(*composition_, declared, block->kind.get_name(),
+            compute_.make_kernel_stage(*model_.get_composition(), declared, block->kind.get_name(),
                                        deploy::byte_view(block->payload), *launch, device_);
         // The weights reach a kernel as its FIRST argument (docs/custom-code.md §4), and they must be
         // in the backend's own memory domain — a kernel dereferences the address, it cannot read a
@@ -593,7 +627,7 @@ private:
     /// this resolution. A run then only executes and replicates.
     void allocate_buffers() {
         buffers_.clear();
-        if (!composition_) return;
+        if (!model_.get_composition()) return;
 
         const auto find_stage = [this](std::string_view name) -> std::size_t {
             for (std::size_t i = 0; i < plan_.size(); ++i)
@@ -601,7 +635,7 @@ private:
             return plan_.size();
         };
 
-        for (const auto& declared : composition_->buffers) {
+        for (const auto& declared : model_.get_composition()->buffers) {
             SharedBuffer buffer;
             buffer.name = declared.name;
 
@@ -609,7 +643,7 @@ private:
             // after it, so the only thing left to check is whether the STAGES agree with what the
             // package declared — which validation cannot see, because reading a package must not
             // require a runtime (rule 3).
-            const deploy::Stage* writer = composition_->get_writer_of(declared.name);
+            const deploy::Stage* writer = model_.get_composition()->get_writer_of(declared.name);
             const std::size_t producer = writer ? find_stage(writer->name) : plan_.size();
             if (producer == plan_.size())
                 throw Exception::invalid_package("buffer `" + declared.name +
@@ -694,11 +728,19 @@ private:
                 std::string(memory::to_string(buffer->get_domain())) + " device " + std::to_string(on) +
                 ", this session runs on device " + std::to_string(device_) +
                 "; load the session with Device::of(buffer) so both land on the same card");
+        // Whatever the caller is holding, make it this backend's. Already ours -> handed straight
+        // back. Memory a renderer owns that was imported once -> imported here too, giving a second
+        // view of the SAME allocation rather than a copy, and asking twice returns the same
+        // reference. Anything with no path -> refused here, naming what would work.
+        buffer = compute_.adopt(std::move(buffer), device_);
         const std::string name(name_view);
         stages_[stage_declaring(name, is_input)]->bind(name, is_input, std::move(buffer));
     }
 
-    deploy::Package package_;
+    Model model_;
+    /// Stages the caller has switched off. Names, not indices: a plan is rebuilt when the grid
+    /// changes and an index would then point at a different stage.
+    std::set<std::string, std::less<>> disabled_;
     Backend backend_;
     int device_ = 0;
     const ComputeBackend& compute_;
@@ -709,7 +751,6 @@ private:
     std::string target_;
     std::int64_t queries_ = 0;
     /// The wiring the package records, or nothing for a single-stage model.
-    std::optional<deploy::Composition> composition_;
     /// What the composition says, in execution order — the ports and invocations `stages_` do not
     /// carry. Index-aligned with `stages_`.
     std::vector<deploy::Stage> plan_;
@@ -717,7 +758,6 @@ private:
     std::vector<std::unique_ptr<Stage>> stages_;
     /// One per stage, in the same order. Built once and never rebuilt: a grid chooses how many
     /// queries run, not what the model weighs.
-    std::vector<StageWeights> weights_;
     /// Device-resident copies of the weights a KERNEL stage reads, held for the session's life
     /// because the kernel holds their address.
     std::vector<std::shared_ptr<memory::MemoryRef>> kernel_weights_;

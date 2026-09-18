@@ -6,46 +6,6 @@
 #include <cstring>
 #include <limits>
 
-namespace RadFiled3D::nn {
-
-// ── CartesianFieldGeometry ─────────────────────────────────────────────────────────────────────────────────
-
-CartesianFieldGeometry CartesianFieldGeometry::make(std::array<std::uint32_t, 3> voxel_counts, std::array<float, 3> field_dimensions_m) {
-    for (const auto c : voxel_counts)
-        if (c == 0) throw Exception::invalid_argument("voxel counts must all be positive");
-    // `<= 0` alone would let a NaN through.
-    for (const float d : field_dimensions_m)
-        if (!std::isfinite(d) || d <= 0.f) throw Exception::invalid_argument("field dimensions must all be positive");
-    return CartesianFieldGeometry{voxel_counts, field_dimensions_m};
-}
-
-CartesianFieldGeometry CartesianFieldGeometry::cubic(std::uint32_t resolution, float field_box_m) {
-    return make({resolution, resolution, resolution}, {field_box_m, field_box_m, field_box_m});
-}
-
-std::array<float, 3> CartesianFieldGeometry::get_voxel_dimensions_m() const noexcept {
-    return {field_dimensions_m[0] / static_cast<float>(voxel_counts[0]),
-            field_dimensions_m[1] / static_cast<float>(voxel_counts[1]),
-            field_dimensions_m[2] / static_cast<float>(voxel_counts[2])};
-}
-
-std::uint64_t CartesianFieldGeometry::get_voxel_count() const noexcept {
-    return static_cast<std::uint64_t>(voxel_counts[0]) * voxel_counts[1] * voxel_counts[2];
-}
-
-glm::vec3 CartesianFieldGeometry::get_field_dimensions() const noexcept {
-    return {field_dimensions_m[0], field_dimensions_m[1], field_dimensions_m[2]};
-}
-
-glm::vec3 CartesianFieldGeometry::get_voxel_dimensions() const noexcept {
-    const auto v = get_voxel_dimensions_m();
-    return {v[0], v[1], v[2]};
-}
-
-glm::uvec3 CartesianFieldGeometry::get_voxel_counts() const noexcept { return {voxel_counts[0], voxel_counts[1], voxel_counts[2]}; }
-
-}  // namespace RadFiled3D::nn
-
 // ── GPUCartesianRadiationField ─────────────────────────────────────────────────────────────────────────────
 // Declared in RadFiled3D itself (field.hpp), so its members are defined here. The helpers below sit
 // in RadFiled3D's anonymous namespace: lookup from RadFiled3D::nn walks up, so the host helpers
@@ -106,8 +66,8 @@ std::shared_ptr<IRadiationField> GPUCartesianRadiationField::copy() const {
 }
 
 nn::CartesianFieldGeometry GPUCartesianRadiationField::get_geometry() const {
-    return nn::CartesianFieldGeometry{{voxel_counts_.x, voxel_counts_.y, voxel_counts_.z},
-                             {field_dimensions_.x, field_dimensions_.y, field_dimensions_.z}};
+    return nn::CartesianFieldGeometry::make({voxel_counts_.x, voxel_counts_.y, voxel_counts_.z},
+                                            {field_dimensions_.x, field_dimensions_.y, field_dimensions_.z});
 }
 
 std::shared_ptr<CartesianRadiationField> GPUCartesianRadiationField::to_host_field() const {
