@@ -86,12 +86,24 @@ std::shared_ptr<memory::MemoryRef> ComputeBackend::adopt(std::shared_ptr<memory:
         return memory;
     }
 
-    // ── host memory binds to ANY backend, and always could ──────────────────────────────────
-    // Not a fallback this function invents: a runtime takes host memory with CPU memory info and
-    // does the transfer itself (`memory_info_for` has handled `Domain::Host` first since before
-    // this function existed, and `FieldInference` binds a host span to a CUDA session in the
-    // tests). Refusing it here would break the ordinary way a caller passes positions in.
-    if (memory->get_domain() == memory::Domain::Host) return memory;
+    // ── host memory does not bind to a DEVICE backend ───────────────────────────────────────
+    //
+    // BINDING NEVER COPIES. A bound buffer is memory the backend reads and writes where it lies;
+    // only ALLOCATION may copy (uploading weights into a buffer it just made, say). Host memory
+    // handed to a device provider cannot honour that: the runtime would have to move the bytes
+    // across the bus, and it does so at BIND time — so a caller who writes new values into the same
+    // buffer and runs again silently gets the first contents. Copying on every run instead would
+    // hide a transfer in the path whose entire purpose is not having one.
+    //
+    // So it is refused, and the caller allocates device memory and uploads once. On the CPU
+    // provider host memory IS the backend's own domain and passes through above, which is why this
+    // is a device-side rule rather than a rule about host memory.
+    if (memory->get_domain() == memory::Domain::Host)
+        throw Exception::invalid_argument(
+            std::string("cannot bind host memory to a ") + std::string(to_string(get_backend())) +
+            " session: binding never copies, and reaching host memory from the device would. "
+            "Allocate device memory for it (ComputeBackend::allocate + upload) and bind that, or "
+            "run on the CPU provider.");
 
     // ── a second view of memory some other API owns ─────────────────────────────────────────
     const auto* external = std::get_if<memory::ExternalOrigin>(&memory->get_origin());

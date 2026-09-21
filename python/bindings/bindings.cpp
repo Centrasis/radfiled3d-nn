@@ -55,6 +55,17 @@ DType dtype_from_name(const std::string& name) {
 Range range_from_object(const py::object& value) {
     if (value.is_none()) return NoRange{};
 
+    // A mapping is the named group the format already carries: a parameter that DECOMPOSES, where
+    // one interval over the whole tensor would be a lie. The patient translation is the case —
+    // ±0.25 m across the table and ±0.5 m along it — and so is a collimation of width and height.
+    if (py::isinstance<py::dict>(value)) {
+        RangeMap map;
+        for (const auto& item : value.cast<py::dict>())
+            map.children.emplace_back(item.first.cast<std::string>(),
+                                      range_from_object(py::reinterpret_borrow<py::object>(item.second)));
+        return map;
+    }
+
     // Strings first: a sequence of them is categorical, and would otherwise be read as numbers.
     if (py::isinstance<py::sequence>(value) && !py::isinstance<py::str>(value)) {
         const auto seq = value.cast<py::sequence>();
@@ -71,7 +82,7 @@ Range range_from_object(const py::object& value) {
     }
     throw py::value_error(
         "range must be (min, max), (min, max, bin_width) for a histogram axis, a sequence of "
-        "category labels, or None");
+        "category labels, a mapping of component name to any of those, or None");
 }
 
 /// What kind of range this is, by name, even where there is no Python shape for its value.
@@ -102,9 +113,13 @@ py::object range_to_object(const Range& range) {
             else if constexpr (std::is_same_v<T, Histogram>)
                 return py::make_tuple(r.min, r.max, r.bin_width);
             else if constexpr (std::is_same_v<T, Categorical>) return py::cast(r.labels);
-            else
-                // NoRange, a named group, or a kind written by a newer producer. The bytes are
-                // preserved either way (rule 5); there is simply no Python shape for them yet.
+            else if constexpr (std::is_same_v<T, RangeMap>) {
+                py::dict out;
+                for (const auto& [name, child] : r.children) out[py::str(name)] = range_to_object(child);
+                return out;
+            } else
+                // NoRange, or a kind written by a newer producer. The bytes are preserved either
+                // way (rule 5); there is simply no Python shape for them yet.
                 return py::none();
         },
         range);
@@ -248,6 +263,14 @@ public:
         // arrays nothing is bound to any more.
         bound_.clear();
     }
+
+    void set_stage_enabled(const std::string& stage, bool enabled) {
+        session_->set_stage_enabled(stage, enabled);
+    }
+    bool is_stage_enabled(const std::string& stage) const {
+        return session_->is_stage_enabled(stage);
+    }
+    std::vector<std::string> get_stage_buffers() const { return session_->get_stage_buffers(); }
 
     void bind_input(const std::string& name, const py::object& obj) { bind(name, obj, true); }
     void bind_output(const std::string& name, const py::object& obj) { bind(name, obj, false); }
@@ -745,6 +768,20 @@ PYBIND11_MODULE(_rfnn, m) {
         .def("infer", &PySession::infer,
              "Run. Releases the GIL for the duration. A missing binding raises, and the message names "
              "every one that is missing rather than the first.")
+        .def("set_stage_enabled", &PySession::set_stage_enabled, py::arg("stage"), py::arg("enabled"),
+             "Stop running a stage, or start again.\n\n"
+             "A skipped stage is not executed and its output buffer is left EXACTLY as the last run "
+             "left it — which is the point. A beam encoder that runs `once` per field, and whose "
+             "beam has not moved, costs nothing to reuse: the memory never moved, so nothing is "
+             "copied forward. The same applies to a positional encoding while the grid is "
+             "unchanged, and the two are independent.\n\n"
+             "The stage must have run at least once first, or its buffer holds whatever the "
+             "allocation started as. Raises for a stage the composition does not declare.")
+        .def("is_stage_enabled", &PySession::is_stage_enabled, py::arg("stage"),
+             "Whether `stage` will run on the next `infer()`.")
+        .def("get_stage_buffers", &PySession::get_stage_buffers,
+             "The composition's named buffers, in order. Empty for a package that is a single "
+             "trunk, which has no intermediates to name.")
         .def_property_readonly("backend", &PySession::get_backend)
         .def_property_readonly("device", &PySession::get_device,
                                "The device ordinal everything in this session runs on — the execution "

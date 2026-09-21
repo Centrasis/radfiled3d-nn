@@ -302,6 +302,36 @@ rfnn_status rfnn_memory_from_d3d12_resource(void* resource, uint64_t size_bytes,
     });
 }
 
+rfnn_status rfnn_memory_from_d3d11_resource(void* resource, void* shared_handle,
+                                            rfnn_d3d11_kind kind, uint64_t size_bytes,
+                                            uint64_t offset_bytes, uint64_t region_bytes,
+                                            const uint8_t device_uuid[16], rfnn_memory** out) {
+    return guard([&]() -> rfnn_status {
+        if (out == nullptr)
+            return fail(RFNN_INVALID_ARGUMENT, "rfnn_memory_from_d3d11_resource: null out parameter");
+        *out = nullptr;
+        if (resource == nullptr)
+            return fail(RFNN_INVALID_ARGUMENT, "rfnn_memory_from_d3d11_resource: null ID3D11Resource");
+        const auto address = reinterpret_cast<std::uintptr_t>(resource);
+        // No shared handle: the reference describes the resource and stops there. Kept legal rather
+        // than refused, because describing an engine allocation is a use of its own — but it cannot
+        // be adopted, and `rfnn_memory_domain` reporting D3D11 is how a caller sees that.
+        if (shared_handle == nullptr) {
+            *out = new rfnn_memory{std::make_shared<nn::memory::dx11::MemoryRef>(
+                address, size_bytes, offset_bytes)};
+            return RFNN_OK;
+        }
+        auto buffer = external_buffer(size_bytes, offset_bytes, region_bytes, device_uuid,
+                                      /*dedicated=*/true);
+        buffer.handle = nn::memory::D3D11Handle{
+            shared_handle, kind == RFNN_D3D11_KMT ? nn::memory::D3D11Handle::Kind::KmtHandle
+                                                  : nn::memory::D3D11Handle::Kind::NtHandle};
+        *out = new rfnn_memory{
+            std::make_shared<nn::memory::dx11::MemoryRef>(address, std::move(buffer))};
+        return RFNN_OK;
+    });
+}
+
 void rfnn_memory_free(rfnn_memory* handle) { delete handle; }
 
 uint64_t rfnn_memory_size_bytes(const rfnn_memory* handle) {

@@ -327,6 +327,13 @@ if(RFNN_BUILD_TOOLS)
   add_executable(rf3m tools/rf3m.cpp)
   set_target_properties(rf3m PROPERTIES FOLDER "targets")
   target_link_libraries(rf3m PRIVATE rfnn::deploy)
+
+  # Adds the missing `Composition` to a package that ships several graphs and no wiring. Unlike
+  # `rf3m` it links the runtime, because it discovers the wiring by asking ONNX Runtime what each
+  # graph consumes and produces rather than assuming a shape.
+  add_executable(rf3m_compose tools/rf3m_compose.cpp)
+  set_target_properties(rf3m_compose PROPERTIES FOLDER "targets")
+  target_link_libraries(rf3m_compose PRIVATE rfnn::rfnn)
 endif()
 if(RFNN_BUILD_EXAMPLES)
   add_executable(write_sample examples/write_sample.cpp)

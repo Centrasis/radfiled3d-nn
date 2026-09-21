@@ -9,6 +9,14 @@
 //      straight into that Vulkan allocation. No host round trip, no copy.
 //   4. A Vulkan compute shader ray-marches the very same buffer and writes an image.
 //
+// The package must carry a COMPOSITION (`rf3m_compose` adds one to an export that lacks it). With
+// it, the runtime runs the beam encoder and the region encoder itself and carries their results
+// between stages in device memory, so a frame uploads the twelve bytes of the beam direction and
+// nothing else — and the region encoder, whose input never changes, is switched off after the first
+// run and its buffer reused. Without a composition the caller would have to drive those graphs by
+// hand and fan a 192-wide latent out across every query: 81 MiB per frame at 48^3 instead of 12
+// bytes.
+//
 // The point is step 4 reading what step 3 wrote WITHOUT anything moving in between. If the import
 // were a copy, the picture would be of stale memory.
 //
@@ -31,6 +39,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <algorithm>
 #include <numbers>
 #include <optional>
@@ -44,12 +53,9 @@ using namespace RadFiled3D::nn;
 
 namespace {
 
-/// The trunk's latent width and region-state size for a PBRFNet-shaped package. Read from the
-/// graphs rather than guessed would be better; these packages declare neither, which is the same
-/// interface gap `encode_beam` explains.
-constexpr std::uint32_t kLatentWidth = 192;
-constexpr std::uint32_t kRegionState = 14;
-/// The encoder's tube spectrum is finer than the one the package declares.
+/// The tube spectrum the beam encoder consumes. Finer than the one the package DECLARES, which is
+/// the interface gap these converted packages carry; the composition wires the graphs to each
+/// other, it does not rename what they call their own inputs.
 constexpr std::size_t kEncoderSpectrumBins = 150;
 
 struct Options {
@@ -63,6 +69,16 @@ struct Options {
     float region_width = 0.25f;   // the trunk's positional-encoding scale
     std::uint32_t frames = 0;     // >0: offscreen, sweep the tube over a full circle
     float tilt = 0.25f;           // elevation of the sweep, radians above the horizon
+    // What moves: the TUBE around the field, or the PATIENT along the table under a fixed beam.
+    // The second only means anything for a model that takes a patient translation.
+    std::string sweep = "tube";
+    bool profile = false;         // time the stages instead of showing anything
+    // The phantom to draw over the field, as raw float32 in ITS OWN frame, and the half-range of
+    // its travel in metres per axis. The ranges are the dataset's
+    // (`GeometryTransformations.patient.Translation`), which no package declares — see --help.
+    std::string patient;
+    float patient_span_x = 0.25f;
+    float patient_span_y = 0.50f;
 };
 
 [[noreturn]] void die(const std::string& what) {
@@ -76,6 +92,10 @@ struct Options {
 /// buffer, and a compute pipeline to march it.
 class Renderer {
 public:
+    static constexpr std::uint32_t kMaxPresentWidth = 3840, kMaxPresentHeight = 2160;
+    /// The canonical phantom grid shipped with the dataset (`patient_occupancy_32.npz`).
+    static constexpr std::uint32_t kPatientGrid = 32;
+
     Renderer(std::uint32_t voxels, std::uint32_t width, std::uint32_t height, bool present)
         : voxels_(voxels), width_(width), height_(height), present_(present) {
         if (present_) open_window();
@@ -83,8 +103,17 @@ public:
         if (present_) create_swapchain();
         volume_bytes_ = std::uint64_t(voxels) * voxels * voxels * sizeof(float);
         volume_ = create_buffer(volume_bytes_, /*exportable=*/true, volume_memory_, volume_allocated_);
-        image_bytes_ = std::uint64_t(width) * height * sizeof(std::uint32_t);
+        // Sized for the largest window this example will follow, not for the starting size: the
+        // buffer is bound into the descriptor set once, so growing it on every resize would mean
+        // rewriting descriptors mid-flight. 4K costs 33 MB and removes that whole class of problem.
+        image_bytes_ = std::uint64_t(std::max(width, kMaxPresentWidth)) *
+                       std::max(height, kMaxPresentHeight) * sizeof(std::uint32_t);
         image_ = create_buffer(image_bytes_, /*exportable=*/false, image_memory_, image_allocated_);
+        // Always allocated, even with no phantom to show: a descriptor set with a hole in it is
+        // invalid, and `patient_grid_ == 0` is what tells the shader there is nothing to draw.
+        patient_bytes_ = std::uint64_t(kPatientGrid) * kPatientGrid * kPatientGrid * sizeof(float);
+        patient_ = create_buffer(patient_bytes_, /*exportable=*/false, patient_memory_,
+                                 patient_allocated_);
         create_pipeline();
     }
 
@@ -100,8 +129,8 @@ public:
         if (set_layout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
         if (descriptors_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, descriptors_, nullptr);
         if (module_ != VK_NULL_HANDLE) vkDestroyShaderModule(device_, module_, nullptr);
-        for (VkBuffer b : {volume_, image_}) if (b != VK_NULL_HANDLE) vkDestroyBuffer(device_, b, nullptr);
-        for (VkDeviceMemory m : {volume_memory_, image_memory_}) if (m != VK_NULL_HANDLE) vkFreeMemory(device_, m, nullptr);
+        for (VkBuffer b : {volume_, image_, patient_}) if (b != VK_NULL_HANDLE) vkDestroyBuffer(device_, b, nullptr);
+        for (VkDeviceMemory m : {volume_memory_, image_memory_, patient_memory_}) if (m != VK_NULL_HANDLE) vkFreeMemory(device_, m, nullptr);
         vkDestroyDevice(device_, nullptr);
         if (surface_ != VK_NULL_HANDLE) vkDestroySurfaceKHR(instance_, surface_, nullptr);
         vkDestroyInstance(instance_, nullptr);
@@ -166,11 +195,9 @@ public:
     /// The dispatch itself, shared by the offscreen and the on-screen paths so both show exactly
     /// the same image.
     void record_raymarch(VkCommandBuffer cmd, const View& view) {
-        struct Push {
-            std::uint32_t vx, vy, vz, width, height;
-            float yaw, pitch, distance, lo, hi;
-        } push{voxels_, voxels_, voxels_, width_, height_, view.yaw, view.pitch,
-               view.distance, view.lo, view.hi};
+        Push push{voxels_, voxels_, voxels_, width_, height_, view.yaw, view.pitch,
+                  view.distance, view.lo, view.hi, patient_grid_, 0u,
+                  {patient_centre_[0], patient_centre_[1], patient_centre_[2]}};
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_, 0, 1, &set_, 0, nullptr);
         vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
@@ -194,7 +221,7 @@ public:
         void* mapped = nullptr;
         VK_OK(vkMapMemory(device_, image_memory_, 0, VK_WHOLE_SIZE, 0, &mapped), "map image");
         std::vector<std::uint32_t> pixels(std::size_t(width_) * height_);
-        std::memcpy(pixels.data(), mapped, image_bytes_);
+        std::memcpy(pixels.data(), mapped, pixels.size() * sizeof(std::uint32_t));
         vkUnmapMemory(device_, image_memory_);
         return pixels;
     }
@@ -322,7 +349,9 @@ private:
         const int screen = DefaultScreen(display_);
         window_ = XCreateSimpleWindow(display_, RootWindow(display_, screen), 0, 0, width_, height_, 0,
                                       BlackPixel(display_, screen), BlackPixel(display_, screen));
-        XStoreName(display_, window_, "radfiled3d-nn — predicted field, ray-marched from shared memory");
+        XStoreName(display_, window_, caption_.empty()
+                       ? "radfiled3d-nn — predicted field, ray-marched from shared memory"
+                       : caption_.c_str());
         XSelectInput(display_, window_,
                      ExposureMask | KeyPressMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask |
                          StructureNotifyMask);
@@ -446,15 +475,71 @@ public:
         return !input.quit;
     }
 
+    /// The model on show, carried into every caption so a screenshot says what produced it.
+    void set_caption(std::string caption) {
+        caption_ = std::move(caption);
+        if (present_) set_title(caption_);
+    }
+
+    const std::string& caption() const noexcept { return caption_; }
+
+    /// Hand the phantom's occupancy to the shader. Until this is called nothing is drawn.
+    void set_patient(const std::vector<float>& occupancy) {
+        if (occupancy.size() != std::size_t(kPatientGrid) * kPatientGrid * kPatientGrid)
+            die("patient occupancy must be " + std::to_string(kPatientGrid) + "^3 floats, got " +
+                std::to_string(occupancy.size()));
+        void* mapped = nullptr;
+        VK_OK(vkMapMemory(device_, patient_memory_, 0, VK_WHOLE_SIZE, 0, &mapped), "map patient");
+        std::memcpy(mapped, occupancy.data(), occupancy.size() * sizeof(float));
+        vkUnmapMemory(device_, patient_memory_);
+        patient_grid_ = kPatientGrid;
+    }
+
+    /// Where the phantom's centre sits, in field units (isocentre 0, box edge ±0.5).
+    void set_patient_centre(std::array<float, 3> centre) noexcept { patient_centre_ = centre; }
+
+    /// Put the measured rates where they are actually read: on the window.
+    void set_title(const std::string& title) {
+        XStoreName(display_, window_, title.c_str());
+        XFlush(display_);
+    }
+
     /// True while the left button is held, so an automatic orbit can stand aside.
     bool is_dragging() const noexcept { return dragging_; }
 
+    /// Rebuild the swapchain against the surface's current size.
+    ///
+    /// `create_swapchain` reads `caps.currentExtent`, so it picks the new size up by itself; what
+    /// this adds is tearing the old objects down first (it also creates the semaphores, which would
+    /// otherwise leak one pair per resize) and moving the RAY-MARCH to the new size, because the
+    /// dispatch and the buffer-to-image copy have to agree on how many pixels exist.
+    void recreate_swapchain() {
+        vkDeviceWaitIdle(device_);
+        if (acquired_ != VK_NULL_HANDLE) vkDestroySemaphore(device_, acquired_, nullptr);
+        if (rendered_ != VK_NULL_HANDLE) vkDestroySemaphore(device_, rendered_, nullptr);
+        acquired_ = rendered_ = VK_NULL_HANDLE;
+        if (swapchain_ != VK_NULL_HANDLE) vkDestroySwapchainKHR(device_, swapchain_, nullptr);
+        swapchain_ = VK_NULL_HANDLE;
+        create_swapchain();
+        // Clamped to what the output buffer was allocated for; a window past that is letterboxed
+        // rather than allowed to read off the end of it.
+        width_ = std::min(extent_.width, kMaxPresentWidth);
+        height_ = std::min(extent_.height, kMaxPresentHeight);
+        extent_.width = width_;
+        extent_.height = height_;
+    }
+
     /// Ray-march the shared volume and show it.
     void present(const View& view) {
+        // A minimised window has no pixels to present to, and a zero-extent swapchain is invalid.
+        if (extent_.width == 0 || extent_.height == 0) { recreate_swapchain(); return; }
         std::uint32_t index = 0;
         const VkResult acquired =
             vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, acquired_, VK_NULL_HANDLE, &index);
-        if (acquired == VK_ERROR_OUT_OF_DATE_KHR) return;   // the window is being resized; skip a frame
+        // A resized window invalidates the swapchain PERMANENTLY: every later acquire returns
+        // OUT_OF_DATE too, so merely skipping the frame leaves the window black for good. Rebuild
+        // it and let the next frame present.
+        if (acquired == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(); return; }
         if (acquired != VK_SUCCESS && acquired != VK_SUBOPTIMAL_KHR) die("vkAcquireNextImageKHR");
 
         VkCommandBuffer cmd = begin_commands();
@@ -499,9 +584,12 @@ public:
         present.swapchainCount = 1;
         present.pSwapchains = &swapchain_;
         present.pImageIndices = &index;
-        vkQueuePresentKHR(queue_, &present);
+        const VkResult shown = vkQueuePresentKHR(queue_, &present);
         VK_OK(vkQueueWaitIdle(queue_), "wait idle");
         vkFreeCommandBuffers(device_, pool_, 1, &cmd);
+        // Present reports the resize too, and on some drivers it is the ONLY one that does.
+        if (shown == VK_ERROR_OUT_OF_DATE_KHR || shown == VK_SUBOPTIMAL_KHR) recreate_swapchain();
+        else if (shown != VK_SUCCESS) die("vkQueuePresentKHR");
     }
 
 private:
@@ -517,8 +605,8 @@ private:
         smi.pCode = kRaymarchSpv;
         VK_OK(vkCreateShaderModule(device_, &smi, nullptr, &module_), "vkCreateShaderModule");
 
-        VkDescriptorSetLayoutBinding bindings[2]{};
-        for (std::uint32_t i = 0; i < 2; ++i) {
+        VkDescriptorSetLayoutBinding bindings[3]{};
+        for (std::uint32_t i = 0; i < 3; ++i) {
             bindings[i].binding = i;
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[i].descriptorCount = 1;
@@ -526,13 +614,13 @@ private:
         }
         VkDescriptorSetLayoutCreateInfo dsl{};
         dsl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        dsl.bindingCount = 2;
+        dsl.bindingCount = 3;
         dsl.pBindings = bindings;
         VK_OK(vkCreateDescriptorSetLayout(device_, &dsl, nullptr, &set_layout_), "descriptor set layout");
 
         VkPushConstantRange range{};
         range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        range.size = 10 * sizeof(std::uint32_t);
+        range.size = sizeof(Push);
         VkPipelineLayoutCreateInfo pli{};
         pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pli.setLayoutCount = 1;
@@ -550,7 +638,7 @@ private:
         cpi.layout = layout_;
         VK_OK(vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &cpi, nullptr, &pipeline_), "compute pipeline");
 
-        VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
+        VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};
         VkDescriptorPoolCreateInfo dpi{};
         dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         dpi.maxSets = 1;
@@ -565,9 +653,10 @@ private:
         dsa.pSetLayouts = &set_layout_;
         VK_OK(vkAllocateDescriptorSets(device_, &dsa, &set_), "descriptor set");
 
-        VkDescriptorBufferInfo infos[2]{{volume_, 0, volume_bytes_}, {image_, 0, image_bytes_}};
-        VkWriteDescriptorSet writes[2]{};
-        for (std::uint32_t i = 0; i < 2; ++i) {
+        VkDescriptorBufferInfo infos[3]{{volume_, 0, volume_bytes_}, {image_, 0, image_bytes_},
+                                        {patient_, 0, patient_bytes_}};
+        VkWriteDescriptorSet writes[3]{};
+        for (std::uint32_t i = 0; i < 3; ++i) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = set_;
             writes[i].dstBinding = i;
@@ -575,7 +664,7 @@ private:
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &infos[i];
         }
-        vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device_, 3, writes, 0, nullptr);
 
         VkCommandPoolCreateInfo cpci{};
         cpci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -588,7 +677,21 @@ public:
     std::string name_;
 
 private:
+    /// Mirrors the shader's push block. `vec3` aligns to 16 bytes in std430, hence the pad.
+    struct Push {
+        std::uint32_t vx, vy, vz, width, height;
+        float yaw, pitch, distance, lo, hi;
+        std::uint32_t patient_grid, pad_;
+        float patient_centre[3];
+    };
+
     std::uint32_t voxels_, width_, height_;
+    std::string caption_;
+    VkBuffer patient_ = VK_NULL_HANDLE;
+    VkDeviceMemory patient_memory_ = VK_NULL_HANDLE;
+    std::uint64_t patient_bytes_ = 0, patient_allocated_ = 0;
+    std::uint32_t patient_grid_ = 0;
+    std::array<float, 3> patient_centre_{};
     bool present_ = false;
 #ifndef RFNN_NO_PRESENT
     Display* display_ = nullptr;
@@ -670,90 +773,91 @@ void window_for(const std::vector<float>& volume, Renderer::View& view) {
     view.hi = std::log(sorted[(sorted.size() * 999) / 1000] + 1e-30f);
 }
 
-/// Run the package's `encoding_config` graph to obtain the trunk's `region_state`.
+/// Frame timing, split into the two things that actually cost: running the network and drawing it.
 ///
-/// NOT optional, and not zeros. `region_state` configures the trunk's positional encoding over the
-/// region of interest, and feeding zeros puts the network far outside anything it was trained on:
-/// the field comes back almost constant (a 1.7x spread over the whole volume) with its peak in a
-/// corner. Driven properly the same model produces ~5800x and puts the peak where the beam enters.
-/// A composition would wire this automatically; this package predates one, so it is run here.
-std::vector<float> encode_region(const deploy::Package& package, float region_width) {
-    const auto graph = package.get_graph("encoding_config");
-    if (!graph) die("this package carries no `encoding_config` graph");
-
-    deploy::PackageBuilder config;
-    config.provenance(package.provenance.dataset, "vk_raymarch", package.provenance.physics)
-        .field_dimensions_m(package.geometry.field_dimensions_m)
-        .input("region_width", deploy::Semantic::from_name("region_width"), {1}).done()
-        .output("region_state", deploy::Semantic::from_name("region_state"), {kRegionState}).done()
-        .graph("trunk", deploy::bytes(graph->begin(), graph->end()));
-
-    auto session = load(config.build(), Backend::Cpu, Device::automatic());
-    session->set_voxel_grid({1, 1, 1});
-    std::vector<float> width{region_width};
-    session->bind_input("region_width", memory::host::MemoryRef::of(std::span<float>(width)));
-    std::vector<float> state(kRegionState);
-    session->bind_output("region_state", memory::host::MemoryRef::of(std::span<float>(state)));
-    session->infer();
-    return state;
-}
-
-/// The package's own `beam_encoder` graph, kept LOADED.
-///
-/// WHY A CLASS. Sweeping the tube means re-encoding every frame, and building a package and an ORT
-/// session per call costs hundreds of milliseconds — the animation would be a slideshow. The
-/// session is built once and its inputs are bound once to buffers that never move, so a frame is
-/// "mutate the direction, infer" and nothing else.
-///
-/// WHY IT EXISTS AT ALL. These packages predate `deploy::Composition`: `beam_encoder` and `trunk`
-/// ship as separate graphs with no wiring block, so the runtime cannot connect them and the
-/// declared interface (`beam_direction`, `tube_spectrum`, ...) does not match the trunk's own
-/// inputs (`latent`, `region_state`). That gap is a known, tested property — see
-/// `FieldInference.TheV1InterfaceGapIsReportedAndNotSilent`. Given a composition, binding
-/// `beam_direction` would reach the encoder through the wiring and this class would not exist.
-class BeamEncoder {
+/// They are measured separately on purpose. "Frames per second" alone cannot say whether a grid is
+/// too large for the model or the ray-march is too expensive, and those have opposite fixes. The
+/// inference figure is also reported per voxel, which is the number that carries across
+/// resolutions.
+class FrameTimer {
 public:
-    BeamEncoder(const deploy::Package& package, std::size_t spectrum_bins, std::uint32_t latent_width)
-        : spectrum_(spectrum_bins), latent_(latent_width) {
-        const auto graph = package.get_graph("beam_encoder");
-        if (!graph) die("this package carries no `beam_encoder` graph");
+    using Clock = std::chrono::steady_clock;
 
-        deploy::PackageBuilder encoder;
-        encoder.provenance(package.provenance.dataset, "vk_raymarch", package.provenance.physics)
-            .field_dimensions_m(package.geometry.field_dimensions_m)
-            // The GRAPH's names, because that is what an ONNX session binds by.
-            .input("direction", deploy::Semantic::BeamDirection, {3}).done()
-            .input("distance", deploy::Semantic::SourceDistance, {1}).done()
-            .input("spectrum", deploy::Semantic::from_name("tube_spectrum"),
-                   {std::uint32_t(spectrum_bins)}).done()
-            .output("linear_5", deploy::Semantic::from_name("latent"), {latent_width}).done()
-            .graph("trunk", deploy::bytes(graph->begin(), graph->end()));
-
-        session_ = load(encoder.build(), Backend::Cpu, Device::automatic());
-        session_->set_voxel_grid({1, 1, 1});
-        // Bound ONCE, to buffers this object owns. A frame changes what is IN them, never where
-        // they are — the discipline the runtime already applies to its own stage buffers.
-        session_->bind_input("direction", memory::host::MemoryRef::of(std::span<float>(direction_)));
-        session_->bind_input("distance", memory::host::MemoryRef::of(std::span<float>(distance_)));
-        session_->bind_input("spectrum", memory::host::MemoryRef::of(std::span<float>(spectrum_)));
-        session_->bind_output("linear_5", memory::host::MemoryRef::of(std::span<float>(latent_)));
+    static double ms_since(Clock::time_point start) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
     }
 
-    void set_spectrum(const std::vector<float>& spectrum) { spectrum_ = spectrum; }
-    void set_distance(float metres) { distance_[0] = metres; }
+    void add(double inference_ms, double render_ms) {
+        inference_ += inference_ms;
+        render_ += render_ms;
+        ++frames_;
+        total_inference_ += inference_ms;
+        total_render_ += render_ms;
+        ++total_frames_;
+    }
 
-    const std::vector<float>& encode(const std::array<float, 3>& direction) {
-        std::copy(direction.begin(), direction.end(), direction_.begin());
-        session_->infer();
-        return latent_;
+    /// True once a reporting window has elapsed; the caller then reads the averages and resets.
+    bool elapsed(double seconds = 1.0) {
+        return std::chrono::duration<double>(Clock::now() - window_).count() >= seconds;
+    }
+
+    struct Rates {
+        double fps, frame_ms, inference_ms, render_ms;
+    };
+
+    Rates take() {
+        const double window = std::chrono::duration<double>(Clock::now() - window_).count();
+        const Rates r{frames_ / std::max(window, 1e-9), (inference_ + render_) / std::max(frames_, 1.0),
+                      inference_ / std::max(frames_, 1.0), render_ / std::max(frames_, 1.0)};
+        inference_ = render_ = 0.0;
+        frames_ = 0.0;
+        window_ = Clock::now();
+        return r;
+    }
+
+    void summarise(std::int64_t queries) const {
+        if (total_frames_ == 0) return;
+        const double inference = total_inference_ / double(total_frames_);
+        const double render = total_render_ / double(total_frames_);
+        std::cout << "\ntiming      " << total_frames_ << " frames\n"
+                  << "  inference " << inference << " ms  (" << (double(queries) / inference / 1e3)
+                  << " M voxels/s)\n"
+                  << "  raymarch  " << render << " ms\n"
+                  << "  total     " << (inference + render) << " ms  -> "
+                  << (1000.0 / std::max(inference + render, 1e-9)) << " fps\n";
     }
 
 private:
-    std::vector<float> direction_{0.f, 0.f, 1.f};
-    std::vector<float> distance_{1.f};
-    std::vector<float> spectrum_;
-    std::vector<float> latent_;
-    std::shared_ptr<InferenceSession> session_;
+    double inference_ = 0.0, render_ = 0.0, frames_ = 0.0;
+    double total_inference_ = 0.0, total_render_ = 0.0;
+    std::int64_t total_frames_ = 0;
+    Clock::time_point window_ = Clock::now();
+};
+
+/// Device memory holding a copy of a host buffer, for a session that will not take host memory.
+///
+/// BINDING NEVER COPIES: a bound buffer is memory the backend reads where it lies, and only
+/// ALLOCATION may move bytes. So anything the trunk reads is allocated on the device once and
+/// written in place afterwards — which is also the faster arrangement, because the positions and
+/// the region state are uploaded a single time and only the latent moves per frame.
+class DeviceBuffer {
+public:
+    DeviceBuffer(const ComputeBackend& backend, std::span<const float> host, int device)
+        : backend_(&backend) {
+        memory_ = backend.allocate(host.size_bytes(), device);
+        if (!host.empty()) backend.upload(*memory_, host.data(), host.size_bytes());
+    }
+
+    /// Overwrite in place. Nothing is re-bound: the session already points at this memory.
+    void write(std::span<const float> host) const {
+        backend_->upload(*memory_, host.data(), host.size_bytes());
+    }
+
+    const std::shared_ptr<memory::MemoryRef>& ref() const noexcept { return memory_; }
+
+private:
+    const ComputeBackend* backend_;
+    std::shared_ptr<memory::MemoryRef> memory_;
 };
 
 /// A tube position on a circle around the field, the way a C-arm sweeps.
@@ -781,6 +885,11 @@ Options parse(int argc, char** argv) {
         else if (a == "--region") o.region_width = std::stof(next());
         else if (a == "--frames") { o.frames = std::stoul(next()); o.present = false; }
         else if (a == "--tilt") o.tilt = std::stof(next());
+        else if (a == "--sweep") o.sweep = next();
+        else if (a == "--profile") { o.profile = true; o.present = false; }
+        else if (a == "--patient") o.patient = next();
+        else if (a == "--patient-span-x") o.patient_span_x = std::stof(next());
+        else if (a == "--patient-span-y") o.patient_span_y = std::stof(next());
         else if (a == "--out") o.out = next();
         else if (a == "--offscreen") { o.present = false; if (o.out.empty()) o.out = "raymarch.ppm"; }
         else die("unknown argument " + a);
@@ -820,6 +929,14 @@ int main(int argc, char** argv) try {
 
     // ── 3. the model, on the card the renderer's memory is already on ───────────────────────
     const deploy::Package package = deploy::Package::read_file(options.model);
+    // A composition is how a MULTI-graph package says which graph feeds which. A single-trunk
+    // package needs none — the runtime runs the trunk — so only demand one when the package
+    // actually carries more than the trunk to connect.
+    if (!package.get_composition() && package.get_executable_block_names().size() > 1)
+        die("this package carries several graphs and no composition, so the runtime cannot connect "
+            "them.\n            Add one first:  rf3m_compose " + options.model + " composed.rf3m\n"
+            "            then pass --model composed.rf3m");
+
     auto session = load(package, Backend::Cuda, Device::of(*flux));
     session->set_voxel_grid({side, side, side});
     std::cout << "model       " << std::filesystem::path(options.model).filename().string()
@@ -838,28 +955,93 @@ int main(int argc, char** argv) try {
               << direction[0] << ", " << direction[1] << ", " << direction[2]
               << "]  distance " << distance[0] << " m\n";
 
-    // The encoder, loaded once and kept. A frame re-encodes; it never rebuilds.
-    BeamEncoder encoder(package, kEncoderSpectrumBins, kLatentWidth);
-    encoder.set_spectrum(spectrum);
-    encoder.set_distance(distance[0]);
+    // ── everything the model needs, in device memory, bound once ────────────────────────────
+    //
+    // The package carries a COMPOSITION, so the runtime runs `beam_encoder` and `encoding_config`
+    // itself and carries their results between stages in device memory. Nothing here encodes
+    // anything, nothing fans a latent out across the queries, and nothing crosses the bus per frame
+    // but the three floats of the beam direction.
+    //
+    // Every one of these is a device buffer because BINDING NEVER COPIES: a bound buffer is an
+    // address the session reads where it lies, so the values are uploaded once and overwritten in
+    // place afterwards.
+    const int device = session->get_device();
 
-    // One latent describes the BEAM, not a point in space, so it is replicated across the queries.
-    // A composition would do exactly this with `Invocation::Once` and a repeat, in device memory.
-    std::vector<float> latents(std::size_t(queries) * kLatentWidth);
-    session->bind_input("latent", memory::host::MemoryRef::of(std::span<float>(latents)));
+    // THE RUNTIME BINDS BY GRAPH NAME, and two generations of package spell those differently: a
+    // recent export uses the deploy vocabulary throughout (`beam_direction`), while a converted one
+    // declares that vocabulary in its metadata but still carries the older names in the graphs
+    // themselves (`direction`). There is no API that lists what a session wants — `infer()` reports
+    // the gap and nothing else does — so each tensor is offered its candidate names in turn and the
+    // one this package answers to sticks. A name it does not have is simply not bound.
+    // EVERY candidate is offered, not just the first that does not throw: binding a name the
+    // package does not have is a no-op rather than an error, so stopping at the first would leave
+    // the real tensor unbound and `infer()` would be the one to notice.
+    const auto try_bind = [&](std::initializer_list<const char*> names,
+                              const std::shared_ptr<memory::MemoryRef>& buffer) {
+        for (const char* name : names) {
+            try {
+                session->bind_input(name, buffer);
+            } catch (const std::exception&) {
+            }
+        }
+    };
 
-    std::vector<float> region_state = encode_region(package, options.region_width);
-    std::cout << "region      width " << options.region_width << " -> region_state["
-              << region_state.size() << "]\n";
-    session->bind_input("region_state", memory::host::MemoryRef::of(std::span<float>(region_state)));
+    // The spectrum width comes from the GRAPH, not the declaration: a converted package can declare
+    // `tube_spectrum` as 32 bins while its `beam_encoder` reads 150, and the runtime binds against
+    // the graph. Both generations want `kEncoderSpectrumBins`, so that is what is sent.
+    const std::vector<float>& spectrum_host = spectrum;
+
+    const DeviceBuffer direction_device(cuda_backend, std::span<const float>(direction), device);
+    const DeviceBuffer distance_device(cuda_backend, std::span<const float>(distance), device);
+    const DeviceBuffer spectrum_device(cuda_backend, std::span<const float>(spectrum_host), device);
+    try_bind({"beam_direction", "direction"}, direction_device.ref());
+    try_bind({"source_distance", "distance"}, distance_device.ref());
+    try_bind({"tube_spectrum", "spectrum"}, spectrum_device.ref());
+
+    // A converted package runs an `encoding_config` stage whose scale the caller supplies, and
+    // never declares it as a tensor — so it is offered unconditionally and ignored when absent.
+    const std::vector<float> region_host{options.region_width};
+    const DeviceBuffer region_device(cuda_backend, std::span<const float>(region_host), device);
+    try_bind({"region_width"}, region_device.ref());
+
+    // Whatever else this package asks for, at its declared width, held constant across the sweep.
+    // Declared per-field tensors carry a leading 1; a per-query one is bound one row per voxel.
+    std::vector<std::unique_ptr<DeviceBuffer>> extra;
+    DeviceBuffer* patient_device = nullptr;
+    std::size_t patient_width = 0;
+    const auto bind_constant = [&](const deploy::TensorDescriptor& d, float value) {
+        const bool per_field = d.shape.size() == 2;
+        const std::size_t width = d.shape.back();
+        const std::size_t rows = per_field ? 1 : std::size_t(queries);
+        std::vector<float> host(rows * width, value);
+        extra.push_back(std::make_unique<DeviceBuffer>(
+            cuda_backend, std::span<const float>(host), device));
+        try_bind({d.name.c_str()}, extra.back()->ref());
+    };
+    for (const deploy::TensorDescriptor* d : package.get_inputs()) {
+        if (d->semantic == deploy::Semantic::Position ||
+            d->semantic == deploy::Semantic::BeamDirection ||
+            d->semantic == deploy::Semantic::SourceDistance ||
+            d->semantic == deploy::Semantic::TubeSpectrum)
+            continue;
+        const float value = d->semantic == deploy::Semantic::BeamCollimation ? 0.12f : 0.0f;
+        bind_constant(*d, value);
+        if (d->semantic == deploy::Semantic::PatientTranslation && d->shape.size() == 2) {
+            patient_device = extra.back().get();
+            patient_width = d->shape.back();
+        }
+        std::cout << "bound       " << d->name << " (" << (d->shape.size() == 2 ? "per field" : "per query")
+                  << ", " << d->shape.back() << " wide)\n";
+    }
 
     // THE binding that matters: the model's flux output IS the renderer's allocation.
     session->bind_output("flux", flux);
-    // `spectrum` is produced too and must go somewhere, but nothing here displays it.
-    std::vector<float> spectrum_out(std::size_t(queries) * 32);
-    session->bind_output("spectrum", memory::host::MemoryRef::of(std::span<float>(spectrum_out)));
+    // The spectrum is produced too and must go somewhere, but nothing here displays it.
+    session->bind_output("spectrum",
+                         cuda_backend.allocate(std::uint64_t(queries) * 32 * sizeof(float), device));
 
-    // Voxel centres of the unit box, in RadFiled3D's own order.
+    // Voxel centres of the unit box, in RadFiled3D's own order. Uploaded ONCE: they do not move
+    // while the grid stands.
     std::vector<float> positions(std::size_t(queries) * 3);
     for (std::uint32_t z = 0; z < side; ++z)
         for (std::uint32_t y = 0; y < side; ++y)
@@ -869,16 +1051,19 @@ int main(int argc, char** argv) try {
                 positions[i * 3 + 1] = (float(y) + 0.5f) / float(side);
                 positions[i * 3 + 2] = (float(z) + 0.5f) / float(side);
             }
-    session->bind_input("position", memory::host::MemoryRef::of(std::span<float>(positions)));
+    const DeviceBuffer position_device(cuda_backend, std::span<const float>(positions), device);
+    try_bind({"position"}, position_device.ref());
 
-    // Encode the tube, fan the latent out over the queries, and run the trunk straight into the
-    // renderer's allocation. The only thing that changes between frames is the direction.
+    std::cout << "stages      ";
+    for (const auto& name : session->get_stage_buffers()) std::cout << "[" << name << "] ";
+    std::cout << "carried in device memory by the runtime\n";
+
+    // A frame: write the new direction, run. Twelve bytes move; the encoders, the latent fan-out
+    // and the region state are the runtime's business.
+    std::array<float, 3> current{};
     const auto run_tube = [&](const std::array<float, 3>& direction_now) {
-        const std::vector<float>& latent = encoder.encode(direction_now);
-        for (std::int64_t q = 0; q < queries; ++q)
-            std::copy(latent.begin(), latent.end(), latents.begin() + q * std::int64_t(latent.size()));
-        if (std::getenv("RFNN_REBIND"))
-            session->bind_input("latent", memory::host::MemoryRef::of(std::span<float>(latents)));
+        current = direction_now;
+        direction_device.write(std::span<const float>(current));
         session->infer();
         // THE TWO APIS SHARE MEMORY BUT NOT A TIMELINE. `infer()` returns once the work is
         // SUBMITTED; the writes land when the CUDA stream drains. Reading the allocation from
@@ -895,6 +1080,68 @@ int main(int argc, char** argv) try {
             die("cudaDeviceSynchronize failed after inference");
     };
 
+    // The patient slides along the table under a stationary beam. `along` is the normalised
+    // translation the package declares, so ±1 is the full range the model was trained over; index 1
+    // is the table axis (the model uses x/y, z is constant).
+    const auto run_patient = [&](float along) {
+        // Centred across the table (x = 0.5 of the normalised range) and travelling along it.
+        std::vector<float> t(patient_width, 0.5f);
+        if (patient_width > 1) t[1] = along;
+        patient_device->write(std::span<const float>(t));
+        session->infer();
+        if (cudaDeviceSynchronize() != cudaSuccess)
+            die("cudaDeviceSynchronize failed after inference");
+    };
+
+    // The phantom, in field units. `translation` is normalised over [0, 1] across the dataset's
+    // generation range, so t = 0.5 is the isocentre and the ends are ±span.
+    const float field_m = package.geometry.field_dimensions_m[0];
+    // The travel comes from the PACKAGE where it declares one. It is a range MAP, not one interval:
+    // across the table and along it are different distances, and the header carries them per axis
+    // (`patient_translation` → {x: (lo, hi), y: (lo, hi)}). The options remain the fallback for a
+    // package exported before that was declared.
+    float span_x = options.patient_span_x, span_y = options.patient_span_y;
+    if (const deploy::TensorDescriptor* d =
+            package.get_tensor_with(deploy::Role::Input, deploy::Semantic::PatientTranslation)) {
+        if (const auto* map = std::get_if<deploy::RangeMap>(&d->range)) {
+            for (const auto& [axis, child] : map->children) {
+                const auto* mm = std::get_if<deploy::MinMax>(&child);
+                if (mm == nullptr) continue;
+                const float half = float(std::max(std::abs(mm->min), std::abs(mm->max)));
+                if (axis == "x") span_x = half;
+                else if (axis == "y") span_y = half;
+            }
+            std::cout << "patient     travel from the package: x ±" << span_x << " m, y ±" << span_y
+                      << " m\n";
+        }
+    }
+    const auto patient_centre_for = [&](float tx, float ty) {
+        return std::array<float, 3>{(2.f * tx - 1.f) * span_x / field_m,
+                                    (2.f * ty - 1.f) * span_y / field_m, 0.f};
+    };
+    if (!options.patient.empty()) {
+        std::ifstream in(options.patient, std::ios::binary);
+        if (!in) die("no patient occupancy at " + options.patient);
+        std::vector<float> occupancy(std::size_t(Renderer::kPatientGrid) * Renderer::kPatientGrid *
+                                     Renderer::kPatientGrid);
+        in.read(reinterpret_cast<char*>(occupancy.data()),
+                std::streamsize(occupancy.size() * sizeof(float)));
+        if (in.gcount() != std::streamsize(occupancy.size() * sizeof(float)))
+            die("patient occupancy is not " + std::to_string(Renderer::kPatientGrid) + "^3 floats");
+        renderer.set_patient(occupancy);
+        renderer.set_patient_centre(patient_centre_for(0.f, 0.f));
+        std::cout << "patient     " << Renderer::kPatientGrid << "^3 occupancy drawn over the field\n";
+    }
+
+    const bool sweep_patient = options.sweep == "patient";
+    if (sweep_patient && patient_device == nullptr)
+        die("--sweep patient needs a model that takes a patient translation; this one does not");
+    if (options.sweep != "patient" && options.sweep != "tube")
+        die("--sweep takes `tube` or `patient`, not `" + options.sweep + "`");
+
+    renderer.set_caption(std::filesystem::path(options.model).stem().string() +
+                         (sweep_patient ? " — patient sweep, beam fixed" : " — tube sweep"));
+
     // THE SWEEP HAS ITS OWN ELEVATION, and does not inherit the random beam's.
     //
     // Taking `asin(direction.y)` from a randomly drawn direction looks reasonable and is not: a
@@ -906,7 +1153,29 @@ int main(int argc, char** argv) try {
     const float tilt = options.tilt;
     float tube_angle = std::atan2(direction[2], direction[0]);
     run_tube(tube_direction(tube_angle, tilt));
+
+    // `encoding_config` turns `region_width` into the trunk's positional-encoding state, and
+    // `region_width` never changes after this point. So the stage is switched OFF: it is not run
+    // again and its buffer keeps what it just wrote, which every later query reads. Nothing is
+    // copied forward — the memory simply never moves. `beam_encoder` stays on, because the beam
+    // does move, and the two are independent.
+    // Only a package that HAS that stage can skip it, and `get_stage_buffers()` lists BUFFERS, not
+    // stages — asking it for a stage name never matches, which silently leaves the stage running.
+    // The session is the thing that knows, so let it answer.
+    const auto disable_stage = [&](const char* stage) {
+        try {
+            session->set_stage_enabled(stage, false);
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
+    };
+    if (disable_stage("encoding_config"))
+        std::cout << "skipped     encoding_config — region_width is fixed, so its buffer is reused\n";
+
     std::cout << "sweep       elevation " << tilt << " rad, one revolution every 30 s\n"
+              << "per frame   " << (3 * sizeof(float)) << " bytes uploaded (the beam direction); "
+              << "the latent and region state stay on the card\n"
               << "inference   " << queries << " voxels written into the renderer's memory\n";
 
     // ── 4. what Vulkan sees in its own allocation ───────────────────────────────────────────
@@ -935,20 +1204,45 @@ int main(int argc, char** argv) try {
     Renderer::View view{0.9f, 0.45f, 2.1f, 0.f, 0.f};
     window_for(seen, view);
 
+    if (options.profile) {
+        // Attribute the frame by REMOVING one stage at a time: the runtime can skip a stage, so the
+        // difference between two configurations is what that stage costs. Nothing else can measure
+        // it — the session exposes no per-stage timer, and an outside profiler sees one `infer()`.
+        const auto time_infer = [&](int repeats) {
+            session->infer();
+            if (cudaDeviceSynchronize() != cudaSuccess) die("sync");
+            const auto started = FrameTimer::Clock::now();
+            for (int i = 0; i < repeats; ++i) {
+                session->infer();
+                if (cudaDeviceSynchronize() != cudaSuccess) die("sync");
+            }
+            return FrameTimer::ms_since(started) / repeats;
+        };
+        std::cout << "\nprofile     " << queries << " voxels, " << session->get_package().provenance.dataset << "\n";
+        const double all_on = time_infer(10);
+        std::cout << "  every stage                " << all_on << " ms\n";
+        double previous = all_on;
+        for (const char* stage : {"encoding_config", "beam_encoder", "trunk"}) {
+            if (!disable_stage(stage)) continue;
+            const double now = time_infer(10);
+            std::cout << "  without " << stage;
+            for (std::size_t i = std::char_traits<char>::length(stage); i < 19; ++i) std::cout << ' ';
+            std::cout << now << " ms   (" << (previous - now) << " ms is `" << stage << "`)\n";
+            previous = now;
+        }
+        return 0;
+    }
+
     if (options.frames > 0) {
         // The same sweep the window shows, written out frame by frame — so what the animation does
         // can be inspected without watching it.
+        FrameTimer timing;
         for (std::uint32_t f = 0; f < options.frames; ++f) {
             const float angle = tube_angle + 2.f * std::numbers::pi_v<float> * float(f) / float(options.frames);
             const auto dir = tube_direction(angle, tilt);
-            if (std::getenv("RFNN_WIPE")) renderer.zero_volume();
+            const auto started = FrameTimer::Clock::now();
             run_tube(dir);
-            if (std::getenv("RFNN_ZERO_LATENT") && (f % 2) == 1) {
-                std::fill(latents.begin(), latents.end(), 0.f);
-                session->infer();
-                if (cudaDeviceSynchronize() != cudaSuccess) die("sync");
-                std::cout << "        (latent zeroed for this frame)\n";
-            }
+            const double inference_ms = FrameTimer::ms_since(started);
             const std::vector<float> volume = renderer.read_volume();
             window_for(volume, view);
             // Where the field actually peaks, and how much is near that peak: a second beam would
@@ -971,12 +1265,14 @@ int main(int argc, char** argv) try {
             std::cout << "frame " << f << "  dir [" << dir[0] << ", " << dir[1] << ", " << dir[2]
                       << "]  peak (" << pc[0] << "," << pc[1] << "," << pc[2] << ")  hot " << hot
                       << "  hot-far-from-peak " << hot_far << "\n";
-            if (!options.out.empty()) {
-                const std::vector<std::uint32_t> pixels = renderer.render(view);
+            const auto drawing = FrameTimer::Clock::now();
+            const std::vector<std::uint32_t> pixels = renderer.render(view);
+            timing.add(inference_ms, FrameTimer::ms_since(drawing));
+            if (!options.out.empty())
                 write_ppm(options.out + "." + std::to_string(f) + ".ppm", pixels, options.width,
                           options.height);
-            }
         }
+        timing.summarise(queries);
         return 0;
     }
 
@@ -999,6 +1295,7 @@ int main(int argc, char** argv) try {
                  "N new tube · R reset view · Q quit\n";
     const Renderer::View home = view;
     Renderer::Input input;
+    FrameTimer timer;
     // A slow turn, about half a minute to the revolution, so the beam's shape reads in three
     // dimensions rather than as one flat projection. Advanced by WALL-CLOCK time, not per frame:
     // the ray-march costs whatever the grid costs, and a per-frame step would spin at a speed that
@@ -1011,6 +1308,7 @@ int main(int argc, char** argv) try {
     constexpr float kSweepSeconds = 30.f;
     constexpr float kSweepRadiansPerSecond = 2.f * std::numbers::pi_v<float> / kSweepSeconds;
     bool sweeping = true;
+    float sweep_phase = 0.f;
     auto previous = std::chrono::steady_clock::now();
     while (renderer.poll(view, input)) {
         const auto now = std::chrono::steady_clock::now();
@@ -1022,23 +1320,57 @@ int main(int argc, char** argv) try {
         }
         if (input.reset) { view.yaw = home.yaw; view.pitch = home.pitch; view.distance = home.distance; }
         if (input.reroll) {
-            // A different tube: new distance and spectrum, same sweep. The allocation is untouched.
+            // A different tube: new distance and spectrum, same sweep. Written into the buffers the
+            // session already points at — no re-bind, and the allocation is untouched.
             const Beam fresh = roll_beam(rng);
-            encoder.set_spectrum(fresh.spectrum);
-            encoder.set_distance(fresh.distance[0]);
+            distance_device.write(std::span<const float>(fresh.distance));
+            spectrum_device.write(std::span<const float>(fresh.spectrum));
             std::cout << "tube        distance " << fresh.distance[0] << " m, new spectrum\n";
         }
 
+        double inference_ms = 0.0;
         if (sweeping || input.reroll) {
-            tube_angle += sweeping ? kSweepRadiansPerSecond * dt : 0.f;
-            run_tube(tube_direction(tube_angle, tilt));
+            const auto started = FrameTimer::Clock::now();
+            if (sweep_patient) {
+                // Back and forth rather than round: a full traverse each way, 30 s to the cycle.
+                // The normalised translation runs over [0, 1] — that is the span the dataset
+                // generated and the model saw, and ±1 would drive it far outside it.
+                sweep_phase += sweeping ? kSweepRadiansPerSecond * dt : 0.f;
+                const float along = 0.5f + 0.5f * std::sin(sweep_phase);
+                run_patient(along);
+                renderer.set_patient_centre(patient_centre_for(0.5f, along));
+            } else {
+                tube_angle += sweeping ? kSweepRadiansPerSecond * dt : 0.f;
+                run_tube(tube_direction(tube_angle, tilt));
+            }
+            inference_ms = FrameTimer::ms_since(started);
             // The field's range travels with the beam, so the ramp is re-windowed each frame.
             // Reading the volume back through Vulkan is what proves, every single frame, that the
-            // shader and the network are looking at the same bytes.
+            // shader and the network are looking at the same bytes. It is NOT counted as inference:
+            // a renderer sampling the volume in place would not do it at all.
             window_for(renderer.read_volume(), view);
         }
+
+        const auto drawing = FrameTimer::Clock::now();
         renderer.present(view);
+        timer.add(inference_ms, FrameTimer::ms_since(drawing));
+
+        if (timer.elapsed()) {
+            const auto r = timer.take();
+            std::ostringstream title;
+            title.setf(std::ios::fixed);
+            title.precision(1);
+            title << renderer.caption() << "   " << r.fps << " fps   infer " << r.inference_ms
+                  << " ms   raymarch " << r.render_ms << " ms   " << side << "^3 = " << queries
+                  << " voxels";
+            renderer.set_title(title.str());
+            std::cout << "\rfps " << r.fps << "   infer " << r.inference_ms << " ms   raymarch "
+                      << r.render_ms << " ms   " << (double(queries) / r.inference_ms / 1e3)
+                      << " M voxels/s        " << std::flush;
+        }
     }
+    std::cout << "\n";
+    timer.summarise(queries);
     std::cout << "closed\n";
     return 0;
 } catch (const std::exception& err) {

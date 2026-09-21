@@ -135,6 +135,24 @@ public:
         memory::cuda::copy_device_to_device(dst, dst_offset, src, src_offset, bytes);
     }
 
+    void download([[maybe_unused]] void* destination, [[maybe_unused]] const memory::MemoryRef& source,
+                  [[maybe_unused]] std::uint64_t bytes) const override {
+#ifndef RFNN_WITH_CUDA
+        throw Exception::feature_disabled("cuda", "reading CUDA device memory back");
+#else
+        if (bytes == 0) return;
+        source.require_domain(memory::Domain::Cuda);
+        if (bytes > source.get_size_bytes())
+            throw Exception::invalid_argument("download would run past the end of an allocation");
+        // In the source's own context, for the same reason the upload is.
+        if (source.get_device_index() >= 0) cudaSetDevice(source.get_device_index());
+        if (cudaMemcpy(destination,
+                       reinterpret_cast<const void*>(static_cast<std::uintptr_t>(source.get_address())),
+                       static_cast<std::size_t>(bytes), cudaMemcpyDeviceToHost) != cudaSuccess)
+            throw Exception::invalid_argument("cudaMemcpy device-to-host failed");
+#endif
+    }
+
     void upload([[maybe_unused]] memory::MemoryRef& dst, [[maybe_unused]] const void* source,
                 [[maybe_unused]] std::uint64_t bytes) const override {
 #ifndef RFNN_WITH_CUDA

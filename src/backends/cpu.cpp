@@ -64,6 +64,17 @@ public:
                     static_cast<std::size_t>(bytes));
     }
 
+    void download(void* destination, const memory::MemoryRef& source,
+                  std::uint64_t bytes) const override {
+        if (bytes == 0) return;
+        source.require_domain(memory::Domain::Host);
+        if (bytes > source.get_size_bytes())
+            throw Exception::invalid_argument("download would run past the end of an allocation");
+        std::memcpy(destination, reinterpret_cast<const void*>(
+                                     static_cast<std::uintptr_t>(source.get_address())),
+                    static_cast<std::size_t>(bytes));
+    }
+
     void upload(memory::MemoryRef& dst, const void* source, std::uint64_t bytes) const override {
         if (bytes == 0) return;
         dst.require_domain(memory::Domain::Host);

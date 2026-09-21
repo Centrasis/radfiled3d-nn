@@ -24,6 +24,10 @@ namespace RadFiled3D::nn::deploy {
 enum class FormatVersion : std::uint32_t {
     /// The layout: magic, version, digest, skippable metadata, typed blocks.
     V1 = 1,
+    /// The SAME layout, under the number it carried before the renumber. Everything after the
+    /// version word is byte-identical to V1, so such a package is read by the V1 serializer and
+    /// rewritten with `kWriteVersion` — that rewrite is what `rf3m convert` is for. Never written.
+    V2_renumbered = 2,
 };
 
 std::string_view to_string(FormatVersion version) noexcept;

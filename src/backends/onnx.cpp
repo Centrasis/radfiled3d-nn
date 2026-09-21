@@ -181,20 +181,24 @@ public:
                                               std::to_string(capacity));
 
         const ComputeBackend& backend = get_compute_backend(backend_);
-        Ort::MemoryInfo info = memory_info_for(*memory, backend, device_);
-        void* address = reinterpret_cast<void*>(
-            static_cast<std::uintptr_t>(memory->get_address() + memory->get_offset_bytes()));
-        Ort::Value value = Ort::Value::CreateTensor(info, address, elements * sizeof(float), shape.data(),
-                                                    shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
         // The reference is held for the lifetime of the binding: ORT keeps the raw pointer, so
         // whoever owns the memory has to stay alive and this is where that is guaranteed.
         if (is_input) {
-            binding_->BindInput(name.c_str(), value);
+            binding_->BindInput(name.c_str(), tensor_for(*memory, shape, elements, backend));
             bound_inputs_.insert_or_assign(name, std::move(memory));
         } else {
-            binding_->BindOutput(name.c_str(), value);
+            binding_->BindOutput(name.c_str(), tensor_for(*memory, shape, elements, backend));
             bound_outputs_.insert_or_assign(name, std::move(memory));
         }
+    }
+
+    Ort::Value tensor_for(const memory::MemoryRef& memory, const std::vector<std::int64_t>& shape,
+                          std::uint64_t elements, const ComputeBackend& backend) {
+        Ort::MemoryInfo info = memory_info_for(memory, backend, device_);
+        void* address = reinterpret_cast<void*>(
+            static_cast<std::uintptr_t>(memory.get_address() + memory.get_offset_bytes()));
+        return Ort::Value::CreateTensor(info, address, elements * sizeof(float), shape.data(),
+                                        shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     }
 
     void run() override {
@@ -246,11 +250,23 @@ struct SharedBuffer {
     std::int64_t repeats = 1;
 
     /// Replicate the producer's single row across the batch, in place and in the buffer's own domain.
+    ///
+    /// By DOUBLING the part already written, not by copying the first row once per repeat: the
+    /// copies are device-to-device and tiny (a 192-wide latent is 768 bytes), so a per-row loop pays
+    /// the per-call overhead a quarter of a million times for a 64³ grid and costs more than the
+    /// network it feeds — measured at 195 ms of a 201 ms frame. Doubling needs ~log2(repeats) calls,
+    /// and each one moves twice what the last did. Source and destination never overlap: the block
+    /// copied is at most as long as the prefix already filled, so it ends where the destination
+    /// begins.
     void repeat(const ComputeBackend& backend) const {
         if (repeats <= 1 || produced <= 0) return;
         const auto span = static_cast<std::uint64_t>(produced) * sizeof(float);
-        for (std::int64_t r = 1; r < repeats; ++r)
-            backend.copy_within(*memory, static_cast<std::uint64_t>(r) * span, *memory, 0, span);
+        for (std::int64_t filled = 1; filled < repeats;) {
+            const std::int64_t chunk = std::min(filled, repeats - filled);
+            backend.copy_within(*memory, static_cast<std::uint64_t>(filled) * span, *memory, 0,
+                                static_cast<std::uint64_t>(chunk) * span);
+            filled += chunk;
+        }
     }
 };
 

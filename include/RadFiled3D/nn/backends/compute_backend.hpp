@@ -109,6 +109,15 @@ public:
     /// Fill `bytes` of a reference in this domain with host data.
     virtual void upload(memory::MemoryRef& dst, const void* source, std::uint64_t bytes) const = 0;
 
+    /// Read `bytes` of a reference in this domain back to host memory.
+    ///
+    /// The counterpart of `upload`, and it exists because BINDING NEVER COPIES: a session on a
+    /// device provider writes its outputs into device memory, so a caller who wants those numbers
+    /// on the host has to ask for them. Doing it here, explicitly, is what keeps the transfer out
+    /// of the bind path — where it would be hidden and would happen on every run.
+    virtual void download(void* destination, const memory::MemoryRef& source,
+                          std::uint64_t bytes) const = 0;
+
     // ── compiled stages ─────────────────────────────────────────────────────────────────────────
 
     /// Whether this backend can run a stage that is a compiled kernel rather than a graph.

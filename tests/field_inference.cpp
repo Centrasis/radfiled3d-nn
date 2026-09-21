@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <string>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -48,6 +49,63 @@ CartesianFieldGeometry test_geometry() { return CartesianFieldGeometry::make({kN
 /// Every normalizer is `Identity` deliberately: the graph's arithmetic is the thing under test, and
 /// a normalizer in the way would make the expected values a second calculation that could itself be
 /// wrong. The normalizer paths have their own cases below.
+/// Device memory holding a copy of `host`, for a session that will not take host memory.
+///
+/// ALLOCATION may copy; BINDING may not. This is the allocation side of that rule and the shape a
+/// caller is meant to use on a device provider: make the buffer once, fill it, bind it, and from
+/// then on write into it in place — the session reads it where it lies, every run.
+struct DeviceBuffer {
+    const ComputeBackend* backend = nullptr;
+    std::shared_ptr<memory::MemoryRef> memory;
+
+    DeviceBuffer(const ComputeBackend& on, std::span<const float> host, int device) : backend(&on) {
+        memory = backend->allocate(host.size_bytes(), device);
+        if (!host.empty()) backend->upload(*memory, host.data(), host.size_bytes());
+    }
+    /// Overwrite in place. No re-bind: the session is already pointed at this memory.
+    void write(std::span<const float> host) const {
+        backend->upload(*memory, host.data(), host.size_bytes());
+    }
+    void read(std::span<float> host) const {
+        backend->download(host.data(), *memory, host.size_bytes());
+    }
+    operator std::shared_ptr<memory::MemoryRef>() const { return memory; }
+};
+
+/// Bind `data` wherever `backend` needs it, and say how to get it back.
+///
+/// On the CPU provider host memory IS the backend's domain, so it binds directly. On a device
+/// provider binding never copies, so this uploads first and binds the device buffer. A test then
+/// reads results through `download`, which is the same thing a caller has to do.
+struct Bound {
+    std::optional<DeviceBuffer> device;
+
+    Bound(InferenceSession& session, Backend on, std::string_view name, bool is_input,
+          std::vector<float>& data) {
+        const ComputeBackend& backend = get_compute_backend(on);
+        std::shared_ptr<memory::MemoryRef> ref;
+        if (backend.get_memory_domain() == memory::Domain::Host) {
+            ref = memory::host::MemoryRef::of(std::span<float>(data));
+        } else {
+            device.emplace(backend, std::span<const float>(data), session.get_device());
+            ref = *device;
+        }
+        if (is_input)
+            session.bind_input(name, std::move(ref));
+        else
+            session.bind_output(name, std::move(ref));
+    }
+
+    /// After a run: make sure `data` holds what the session produced.
+    void download(std::vector<float>& data) const {
+        if (device) device->read(std::span<float>(data));
+    }
+    /// Before a run: make sure the session sees what `data` now holds.
+    void upload(const std::vector<float>& data) const {
+        if (device) device->write(std::span<const float>(data));
+    }
+};
+
 deploy::Package probe_package() {
     deploy::PackageBuilder builder;
     builder.provenance("field-probe", "radfiled3d-nn tests", "none")
@@ -590,10 +648,13 @@ void expect_kernel_chain_runs(Backend backend) {
     const auto positions = make_voxel_center_positions(CartesianFieldGeometry::cubic(kSide, 1.f));
     std::vector<float> position(positions.begin(), positions.end());
     std::vector<float> direction{1.f, 1.f, 1.f}, flux(kQ, 0.f);
-    session->bind_input("position", memory::host::MemoryRef::of(std::span<float>(position)));
-    session->bind_input("beam_direction", memory::host::MemoryRef::of(std::span<float>(direction)));
-    session->bind_output("flux", memory::host::MemoryRef::of(std::span<float>(flux)));
+    // Bound where the backend needs it: host memory on the CPU provider, device memory on CUDA.
+    // Binding never copies, so the CUDA path uploads first — and reads the answer back after.
+    Bound(*session, backend, "position", true, position);
+    Bound(*session, backend, "beam_direction", true, direction);
+    const Bound bound_flux(*session, backend, "flux", false, flux);
     session->infer();
+    bound_flux.download(flux);
 
     for (std::size_t q = 0; q < kQ; ++q) {
         const float expected = position[q * 3] + position[q * 3 + 1] + position[q * 3 + 2] +
@@ -652,15 +713,17 @@ TEST(FieldInference, ARepeatedInferenceOnAKernelChainAllocatesNothing) {
     const auto positions = make_voxel_center_positions(CartesianFieldGeometry::cubic(2, 1.f));
     std::vector<float> position(positions.begin(), positions.end());
     std::vector<float> direction{1.f, 1.f, 1.f}, first(8, 0.f), second(8, 0.f);
-    session->bind_input("position", memory::host::MemoryRef::of(std::span<float>(position)));
-    session->bind_input("beam_direction", memory::host::MemoryRef::of(std::span<float>(direction)));
+    Bound(*session, Backend::Cuda, "position", true, position);
+    Bound(*session, Backend::Cuda, "beam_direction", true, direction);
 
-    session->bind_output("flux", memory::host::MemoryRef::of(std::span<float>(first)));
+    const Bound bound_first(*session, Backend::Cuda, "flux", false, first);
     session->infer();
+    bound_first.download(first);
     const void* weights_address = session->get_stage_weights("scale").get_bytes().data();
 
-    session->bind_output("flux", memory::host::MemoryRef::of(std::span<float>(second)));
+    const Bound bound_second(*session, Backend::Cuda, "flux", false, second);
     session->infer();
+    bound_second.download(second);
 
     EXPECT_EQ(session->get_stage_weights("scale").get_bytes().data(), weights_address);
     for (std::size_t q = 0; q < first.size(); ++q) EXPECT_FLOAT_EQ(first[q], second[q]) << "voxel " << q;
@@ -757,11 +820,59 @@ TEST(FieldInference, MemoryFromAnotherDeviceIsRefusedRatherThanFaultedOn) {
         EXPECT_NE(what.find("device 0"), std::string::npos) << what;
     }
 
-    // Memory that does not know its device is not refused: -1 means "no such notion", and a host
-    // buffer binds to a session on any card.
+    // And host memory is refused too, for a different reason: BINDING NEVER COPIES, so reaching a
+    // host buffer from the device is not something a bind may quietly arrange. The message says so
+    // and says what to do instead.
     std::vector<float> host(3, 0.5f);
-    EXPECT_NO_THROW(session->bind_input("position",
-                                        memory::host::MemoryRef::of(std::span<float>(host))));
+    try {
+        session->bind_input("position", memory::host::MemoryRef::of(std::span<float>(host)));
+        FAIL() << "host memory must not bind to a device session";
+    } catch (const RadFiled3D::nn::Exception& e) {
+        EXPECT_NE(std::string(e.what()).find("binding never copies"), std::string::npos) << e.what();
+    }
+}
+
+/// Writing new values into an already-bound DEVICE buffer reaches the next run, with no re-bind.
+///
+/// This is what "binding never copies" buys. The session holds the address, not a snapshot, so a
+/// caller uploads once into memory it allocated and then overwrites it in place for every query —
+/// which is the loop a renderer actually runs.
+///
+/// The counterpart is `MemoryFromAnotherDeviceIsRefusedRatherThanFaultedOn`: host memory is refused
+/// here rather than copied, because a copy is exactly what the binding protocol promises not to do.
+/// An earlier arrangement accepted it and let ONNX Runtime copy at BIND time, which silently fed
+/// every run after the first the FIRST contents — found by an interop demo whose beam swept while
+/// the predicted field never moved.
+TEST(FieldInference, ChangingABoundDeviceBufferReachesTheNextRun) {
+    if (!onnx::available()) GTEST_SKIP() << "built without ONNX Runtime";
+    if (!cuda::available() || cuda::get_device_count() == 0) GTEST_SKIP() << "no CUDA device";
+
+    constexpr std::uint32_t kSide = 4;
+    constexpr std::size_t kQueries = std::size_t(kSide) * kSide * kSide;
+    const std::shared_ptr<InferenceSession> session = onnx::load(probe_package(), Backend::Cuda, 0);
+    session->set_voxel_grid({kSide, kSide, kSide});
+
+    // The probe graph answers `flux = x + y + z`, so a changed position MUST change the answer.
+    std::vector<float> positions(kQueries * 3, 0.f);
+    std::vector<float> flux(kQueries, 0.f);
+    std::vector<float> direction;
+    std::vector<float> spectrum(kQueries * 4, 0.f);
+    const Bound bound_positions(*session, Backend::Cuda, "position", true, positions);
+    direction.assign(3, 1.f);   // what `unit_direction` binds: flux = x + y + z
+    Bound(*session, Backend::Cuda, "beam_direction", true, direction);
+    const Bound bound_flux(*session, Backend::Cuda, "flux", false, flux);
+    Bound(*session, Backend::Cuda, "spectrum", false, spectrum);
+
+    session->infer();
+    bound_flux.download(flux);
+    EXPECT_NEAR(flux[0], 0.f, 1e-5f) << "all-zero positions sum to zero";
+
+    // The SAME device buffer, new contents, no re-bind.
+    std::fill(positions.begin(), positions.end(), 1.f);
+    bound_positions.upload(positions);
+    session->infer();
+    bound_flux.download(flux);
+    EXPECT_NEAR(flux[0], 3.f, 1e-5f) << "the run used stale input: a bound buffer is not a snapshot";
 }
 
 TEST(FieldInference, CudaCanSayWhichDeviceAPointerIsOn) {

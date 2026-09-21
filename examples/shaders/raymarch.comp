@@ -12,6 +12,10 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) readonly buffer Volume { float flux[]; };
 /// 0xAABBGGRR per pixel, ready to write out as an image.
 layout(std430, binding = 1) writeonly buffer Image { uint pixel[]; };
+/// The phantom's occupancy in ITS OWN frame, the same canonical grid the physics probe marches.
+/// Drawn so the sweep can be read: without it a moving patient is only an inference about a
+/// changing scatter cloud, and the point is to see whether the cloud follows the body.
+layout(std430, binding = 2) readonly buffer Patient { float occupancy[]; };
 
 layout(push_constant) uniform Push {
     uvec3 voxels;      // grid resolution
@@ -26,7 +30,21 @@ layout(push_constant) uniform Push {
     // a flat wash.
     float lo;
     float hi;
+    // Patient frame: the phantom grid's resolution (0 = none to draw) and where its centre sits,
+    // in the same field units the model uses — isocentre at 0, box edge at ±0.5.
+    uint  patient_grid;
+    vec3  patient_centre;
 } push;
+
+/// Occupancy at a point given in UNIT-CUBE coordinates, 0 outside the phantom's own box.
+float sample_patient(vec3 p) {
+    if (push.patient_grid == 0u) return 0.0;
+    vec3 q = (p - vec3(0.5) - push.patient_centre) + vec3(0.5);   // unit cube -> field -> patient
+    if (any(lessThan(q, vec3(0.0))) || any(greaterThanEqual(q, vec3(1.0)))) return 0.0;
+    ivec3 v = ivec3(q * float(push.patient_grid));
+    v = clamp(v, ivec3(0), ivec3(int(push.patient_grid) - 1));
+    return occupancy[uint(v.x) + push.patient_grid * (uint(v.y) + push.patient_grid * uint(v.z))];
+}
 
 float sample_flux(ivec3 v) {
     v = clamp(v, ivec3(0), ivec3(push.voxels) - 1);
@@ -89,11 +107,21 @@ void main() {
         vec3 accum = vec3(0.0);
         float transmittance = 1.0;
         for (int i = 0; i < kSteps; ++i, t += dt) {
-            float raw = max(sample_flux(eye + dir * t), 0.0);
+            vec3 p = eye + dir * t;
+            float raw = max(sample_flux(p), 0.0);
             float v = clamp((log(raw + 1e-30) - push.lo) / max(push.hi - push.lo, 1e-6), 0.0, 1.0);
             float alpha = 1.0 - exp(-v * 6.0 * dt);
             accum += transmittance * alpha * palette(v);
             transmittance *= 1.0 - alpha;
+
+            // The phantom as a faint cool haze over the field. Deliberately weak and untinted by
+            // the dose ramp, so it reads as geometry and can never be mistaken for predicted flux.
+            float body = sample_patient(p);
+            if (body > 0.5) {
+                float shell = 1.0 - exp(-0.45 * dt);
+                accum += transmittance * shell * vec3(0.55, 0.85, 1.0);
+                transmittance *= 1.0 - shell;
+            }
             if (transmittance < 0.003) break;
         }
         colour = accum + colour * transmittance;

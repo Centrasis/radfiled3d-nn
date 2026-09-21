@@ -52,10 +52,14 @@ std::pair<byte_view, Reader> split(byte_view bytes) {
     if (!std::equal(kMagic.begin(), kMagic.end(), bytes.begin())) throw Exception::bad_magic("magic is not \"RF3M\"");
     Reader r(bytes.subspan(4));
     const std::uint32_t version = r.u32("file version");
-    // There is one container version, so anything else is a package this build cannot read: a
-    // newer producer, or a header corrupt past the magic. Reported by number rather than misparsed
-    // — the digest below would catch the corruption anyway, but not say what was wrong.
-    if (version != kVersion) throw Exception::unsupported_version(version, kVersion);
+    // This layout answers to two words: the one it is written with, and the one it carried before
+    // the renumber. The digest covers the body only, so a package differing purely in that word is
+    // intact and readable — `rf3m convert` rewrites it with the current number. Anything else is a
+    // package this build cannot read (a newer producer, or a header corrupt past the magic), and is
+    // reported by number rather than misparsed.
+    if (version != kVersion &&
+        version != static_cast<std::uint32_t>(FormatVersion::V2_renumbered))
+        throw Exception::unsupported_version(version, kVersion);
     const byte_view digest = r.take(kDigestBytes, "digest");
     const auto computed = digest_of(bytes.subspan(kHeaderBytes - 8));
     if (!std::equal(computed.begin(), computed.end(), digest.begin())) throw Exception::digest_mismatch();

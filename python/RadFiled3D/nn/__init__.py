@@ -71,9 +71,16 @@ def __getattr__(name: str):
     must not pay for it. The submodule is loaded on first attribute access instead.
     """
     if name == "torch_export":
-        from . import torch_export
+        # `import_module`, NOT `from . import torch_export`: the latter asks this package for the
+        # attribute first, which lands back in here and recurses until the stack ends. It only
+        # appears to work once something else has imported the submodule by its full path and set
+        # the attribute — so the failure is a COLD `from RadFiled3D.nn import torch_export`, which
+        # is exactly what a first-time consumer writes.
+        import importlib
 
-        return torch_export
+        module = importlib.import_module(f"{__name__}.torch_export")
+        globals()[name] = module          # so the next access never reaches __getattr__ at all
+        return module
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

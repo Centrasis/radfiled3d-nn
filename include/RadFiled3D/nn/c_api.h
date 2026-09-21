@@ -171,6 +171,20 @@ RFNN_API rfnn_status rfnn_memory_import_d3d11(void* shared_handle, rfnn_d3d11_ki
 RFNN_API rfnn_status rfnn_memory_from_d3d12_resource(void* resource, uint64_t size_bytes,
                                                      uint64_t offset_bytes, rfnn_memory** out);
 
+/* An engine-owned ID3D11Resource, kept in the D3D11 domain rather than imported.
+ *
+ * For an engine that owns the D3D11 device — Unity — and wants ONE object describing the resource
+ * it keeps using and the allocation a session writes into. `shared_handle` may be NULL, which gives
+ * a reference that only DESCRIBES the resource: no compute backend runs on D3D11, so without a
+ * shared handle there is nothing to import it through and a session cannot bind it. Pass the handle
+ * from IDXGIResource1::CreateSharedHandle (NT) or IDXGIResource::GetSharedHandle (KMT) to make it
+ * bindable; the engine keeps ownership of the handle either way. */
+RFNN_API rfnn_status rfnn_memory_from_d3d11_resource(void* resource, void* shared_handle,
+                                                     rfnn_d3d11_kind kind, uint64_t size_bytes,
+                                                     uint64_t offset_bytes, uint64_t region_bytes,
+                                                     const uint8_t device_uuid[16],
+                                                     rfnn_memory** out);
+
 RFNN_API void        rfnn_memory_free(rfnn_memory* handle);
 /* Bytes the reference spans, 0 for NULL. */
 RFNN_API uint64_t    rfnn_memory_size_bytes(const rfnn_memory* handle);

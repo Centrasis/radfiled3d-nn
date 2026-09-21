@@ -170,6 +170,43 @@ TEST(CApi, HostMemoryCrossesAsAnOpaqueHandle) {
     EXPECT_EQ(rfnn_memory_from_host(values.data(), 4, nullptr), RFNN_INVALID_ARGUMENT);
 }
 
+TEST(CApi, AD3D11ResourceCrossesWithoutBeingImported) {
+    // The Unity shape: the engine owns the D3D11 device, so its resource is not imported — it is
+    // DESCRIBED, and stays in the D3D11 domain while the engine goes on using it.
+    void* const resource = reinterpret_cast<void*>(std::uintptr_t{0xd3d11});
+    rfnn_memory* memory = nullptr;
+    ASSERT_EQ(rfnn_memory_from_d3d11_resource(resource, /*shared_handle=*/nullptr, RFNN_D3D11_NT,
+                                              4096, 0, 4096, nullptr, &memory),
+              RFNN_OK);
+    ASSERT_NE(memory, nullptr);
+    EXPECT_EQ(rfnn_memory_domain(memory), RFNN_DOMAIN_D3D11);
+    EXPECT_EQ(rfnn_memory_size_bytes(memory), 4096u);
+    rfnn_memory_free(memory);
+
+    // With a shared handle it describes the same resource AND carries what a compute backend needs
+    // to import it. Both handle kinds are accepted; which one it is decides the CUDA import type.
+    for (const rfnn_d3d11_kind kind : {RFNN_D3D11_NT, RFNN_D3D11_KMT}) {
+        rfnn_memory* shareable = nullptr;
+        ASSERT_EQ(rfnn_memory_from_d3d11_resource(resource,
+                                                  reinterpret_cast<void*>(std::uintptr_t{0x5ade}),
+                                                  kind, 4096, 256, 1024, nullptr, &shareable),
+                  RFNN_OK);
+        ASSERT_NE(shareable, nullptr);
+        EXPECT_EQ(rfnn_memory_domain(shareable), RFNN_DOMAIN_D3D11);
+        // The region, not the whole allocation: a renderer suballocates.
+        EXPECT_EQ(rfnn_memory_size_bytes(shareable), 1024u);
+        rfnn_memory_free(shareable);
+    }
+
+    // A null resource is a caller bug: there is nothing to denote.
+    rfnn_memory* bad = nullptr;
+    EXPECT_EQ(rfnn_memory_from_d3d11_resource(nullptr, nullptr, RFNN_D3D11_NT, 16, 0, 16, nullptr, &bad),
+              RFNN_INVALID_ARGUMENT);
+    EXPECT_EQ(bad, nullptr);
+    EXPECT_EQ(rfnn_memory_from_d3d11_resource(resource, nullptr, RFNN_D3D11_NT, 16, 0, 16, nullptr, nullptr),
+              RFNN_INVALID_ARGUMENT);
+}
+
 TEST(CApi, AnUnknownBackendNameIsRefusedAtTheBoundary) {
     // The vocabulary is the C++ one; this ABI forwards a name and re-decides nothing, so a typo
     // must fail here rather than quietly selecting a default.

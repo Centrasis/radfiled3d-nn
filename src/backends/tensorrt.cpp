@@ -62,6 +62,11 @@ public:
         cuda::compute_backend().upload(dst, source, bytes);
     }
 
+    void download(void* destination, const memory::MemoryRef& source,
+                  std::uint64_t bytes) const override {
+        cuda::compute_backend().download(destination, source, bytes);
+    }
+
     bool can_launch_kernels() const noexcept override {
         return cuda::compute_backend().can_launch_kernels();
     }

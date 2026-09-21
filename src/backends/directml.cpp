@@ -90,6 +90,11 @@ public:
         cpu::compute_backend().upload(dst, source, bytes);
     }
 
+    void download(void* destination, const memory::MemoryRef& source,
+                  std::uint64_t bytes) const override {
+        cpu::compute_backend().download(destination, source, bytes);
+    }
+
     bool can_launch_kernels() const noexcept override { return false; }
 
     std::unique_ptr<Stage> make_kernel_stage(const deploy::Composition&, const deploy::Stage& stage,

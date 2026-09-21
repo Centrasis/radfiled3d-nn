@@ -9,6 +9,7 @@ namespace RadFiled3D::nn::deploy {
 std::string_view to_string(FormatVersion version) noexcept {
     switch (version) {
         case FormatVersion::V1: return "v1";
+        case FormatVersion::V2_renumbered: return "v2";
     }
     return "?";
 }
@@ -19,20 +20,20 @@ FormatVersion peek_version(byte_view bytes) {
     if (!std::equal(kMagic.begin(), kMagic.end(), bytes.begin()))
         throw Exception::bad_magic("magic is not \"RF3M\"");
 
-    // The version word decides, and nothing else does. A word this build does not know is reported
-    // as such rather than guessed at — the digest is there to prove a package is intact, never to
-    // identify which layout it is in.
+    // The version word decides, and nothing else does — the digest proves a package is intact,
+    // never which layout it is in. Peeking REPORTS the word, including one this build cannot serve:
+    // refusing it is the parser's job (`get_serializer_by`), so a tool can name the version of a
+    // package it is unable to read.
     Reader r(bytes.subspan(kMagic.size()));
-    const std::uint32_t version = r.u32("format version");
-    if (version != static_cast<std::uint32_t>(FormatVersion::V1))
-        throw Exception::unsupported_version(version, static_cast<std::uint32_t>(kWriteVersion));
-    return FormatVersion::V1;
+    return static_cast<FormatVersion>(r.u32("format version"));
 }
 
 const Serializer& get_serializer_by(FormatVersion version) {
     static const v1::Serializer kV1;
     switch (version) {
-        case FormatVersion::V1: return kV1;
+        // One layout, two numbers: the renumbered word differs, the bytes it introduces do not.
+        case FormatVersion::V1:
+        case FormatVersion::V2_renumbered: return kV1;
     }
     throw Exception::unsupported_version(static_cast<std::uint32_t>(version),
                                          static_cast<std::uint32_t>(kWriteVersion));

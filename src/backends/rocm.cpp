@@ -56,6 +56,10 @@ public:
         throw Exception::feature_disabled("rocm", "copying within HIP device memory");
     }
 
+    void download(void*, const memory::MemoryRef&, std::uint64_t) const override {
+        throw Exception::feature_disabled("rocm", "reading device memory back");
+    }
+
     void upload(memory::MemoryRef&, const void*, std::uint64_t) const override {
         throw Exception::feature_disabled("rocm", "uploading to HIP device memory");
     }
